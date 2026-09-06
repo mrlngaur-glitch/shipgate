@@ -247,8 +247,13 @@ jobs:
           #      evaluation still renders CONTRADICTED, not a false VERIFIED) — confirmed
           #      RED against the pre-fix code first (git stash on checkers.py alone), all
           #      5 new/changed assertions failing for the stated reason, not a stub error.
-          # = 466 — the current count
-          MIN_TESTS: 466
+          # = 466 — a subtotal. Superseded below — this is no longer the current count.
+          # + 2  tests/unit/test_report.py and tests/unit/test_cli_report.py — Finding 8
+          #      systematic integrity pass: every rendered Ship Report input enumerated
+          #      with its source and whether --verify's hash-chain re-derivation covers it;
+          #      one data-layer test, one CLI-output wording test.
+          # = 468 — the current count
+          MIN_TESTS: 468
 
       - name: Tests
         run: python -m pytest

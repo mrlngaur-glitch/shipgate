@@ -6,7 +6,7 @@ AI coding agents constantly fall into a classic trap: declaring victory the mome
 
 > **Status: pre-launch, Phase 3 substantially built.** The gate, the append-only ledger, the
 > hooks that write to it, and the CLI below (`init` / `status` / `report` / `doctor` /
-> `declare-task-class` / `analyze`) are real, tested (466 tests, Windows, local, this commit,
+> `declare-task-class` / `analyze`) are real, tested (468 tests, Windows, local, this commit,
 > shown running below; CI's own most recently recorded run — Linux, [run
 > 34025172117](https://github.com/mrlngaur-glitch/shipgate/actions/runs/34025172117) —
 > collected 466, 465 passed and 1 skipped, see the table below for exactly what that run
@@ -112,10 +112,10 @@ $ .venv\Scripts\python.exe -m pytest -q
 ........................................................................ [ 30%]
 ........................................................................ [ 46%]
 ........................................................................ [ 61%]
-........................................................................ [ 77%]
+........................................................................ [ 76%]
 ........................................................................ [ 92%]
-..................................                                       [100%]
-466 passed in 46.51s
+....................................                                     [100%]
+468 passed in 127.43s (0:02:07)
 
 $ .venv\Scripts\lint-imports.exe
 =============
@@ -260,7 +260,7 @@ each command by hand and see what it does.
 |---|---|---|---|
 | 1 | The Windows install (three `pip` commands above) works end-to-end | `runtime-verified` | Run in a genuinely fresh venv this session; `pytest`/`lint-imports` output pasted above, unedited |
 | 2 | The macOS/Linux install works the same way — narrowly true for the three `pip` lines only, not for `git clone` / `python3.12 -m venv .venv` / `source .venv/bin/activate` | `runtime-verified` (Linux, the three `pip` lines) / not run anywhere (Linux, the other two lines) / `disk-verified` (macOS, the whole block) | CI's first real run ([run 32182623079](https://github.com/mrlngaur-glitch/shipgate/actions/runs/32182623079)) runs `actions/checkout` (not `git clone`) and `actions/setup-python` (not `python3.12 -m venv .venv`, and no `source activate`), then this block's three `pip` commands — so only those three are CI-verified on Linux. Fair to this project's own other work: `ci.yml:158`'s audit step does run `python -m venv "$RUNNER_TEMP/auditenv"` on this same Ubuntu runner, so the `venv` *module* is demonstrably not broken on CI's Python; what's untested is the `python3.12` binary name on a stock Ubuntu (`ensurepip` ships separately as the `python3.12-venv` package there — a real, plausible failure, not a pedantic one) and the activation line. macOS: nothing in this block has run anywhere |
-| 3 | Tests pass — **466, Windows, local, this commit**, and separately, **465 passed / 1 skipped of 466 collected, Linux, CI, [run 34025172117](https://github.com/mrlngaur-glitch/shipgate/actions/runs/34025172117) — not this commit**, since a push hasn't happened since this commit was made and CI only runs on push; the gap is this commit's own 37 tests added since that run (29 already counted the last time this row was updated — see git history for that breakdown — plus 8 new this round: `tests/unit/test_checkers.py`'s fix for `hook-installed`'s self-poisoning bug, PHASE_PLAN.md P38 item 3 — 3 negative-control tests, one per allowlisted genuine record type; 4 parametrized tests enumerating the full closed set of excluded self-generated record types; 1 reproducing the exact self-poisoning sequence end-to-end, confirmed RED against the pre-fix code first), not a platform difference | `runtime-verified` (both, against their own stated scope) | Windows: pasted above, this session, this commit. Linux/CI: run 34025172117 — 466 collected (minimum 466 at that commit), 465 passed, 1 skipped; the skip is `tests/integration/test_hooks_e2e.py`'s Windows-only `icacls` ACL test (`skipif(os.name != "nt")`) — the same honest platform skip CI has always shown, not a vacuous pass |
+| 3 | Tests pass — **468, Windows, local, this commit**, and separately, **465 passed / 1 skipped of 466 collected, Linux, CI, [run 34025172117](https://github.com/mrlngaur-glitch/shipgate/actions/runs/34025172117) — not this commit**, since a push hasn't happened since this commit was made and CI only runs on push; the gap is this commit's own 39 tests added since that run (37 already counted the last time this row was updated — see git history for that breakdown — plus 2 new this round: `tests/unit/test_report.py` and `tests/unit/test_cli_report.py` — Finding 8's systematic integrity pass: every rendered Ship Report input enumerated with its source and whether `--verify`'s hash-chain re-derivation covers it; one data-layer test, one CLI-output wording test), not a platform difference | `runtime-verified` (both, against their own stated scope) | Windows: pasted above, this session, this commit. Linux/CI: run 34025172117 — 466 collected (minimum 466 at that commit), 465 passed, 1 skipped; the skip is `tests/integration/test_hooks_e2e.py`'s Windows-only `icacls` ACL test (`skipif(os.name != "nt")`) — the same honest platform skip CI has always shown, not a vacuous pass |
 | 4 | `shipgate init` writes `shipfile.yaml` / `CLAUDE.md` / `.claude/settings.json`, never overwrites | `runtime-verified` | Real run, this session, pasted above; the never-overwrite behavior is separately tested (`tests/`) |
 | 5 | The hooks write real ledger rows via the same entrypoints Claude Code invokes | `runtime-verified` | Real subprocess run of all three hook modules this session, JSON on stdin, feeding the `status`/`report` output above |
 | 6 | `shipgate report` renders a verdict per claim, a blast-radius line, a token line, and a self-verifying ledger receipt | `runtime-verified` | Pasted above, unedited, this session |
@@ -288,7 +288,7 @@ Without an independent gate recording hash-chained proof, these failures drift i
 | Path | What it is |
 |---|---|
 | `shipgate/` | The core package — ledger, gate, verdict taxonomy, checkers, hooks, CLI |
-| `tests/` | 466 tests (unit + integration) — the real evidence behind every `runtime-verified` row above. 466 pass / 0 skipped locally on Windows, this commit; CI's own most recently recorded run (run 34025172117, not this commit — see the evidence table above) saw 465 pass / 1 skipped of 466 collected on Linux (the Windows-only `icacls` test) |
+| `tests/` | 468 tests (unit + integration) — the real evidence behind every `runtime-verified` row above. 468 pass / 0 skipped locally on Windows, this commit; CI's own most recently recorded run (run 34025172117, not this commit — see the evidence table above) saw 465 pass / 1 skipped of 466 collected on Linux (the Windows-only `icacls` test) |
 | `reporters/` | Per-test-runner reporters (`pytest` today; the vacuous-pass detection `tests_pass` relies on) |
 | `docs/verdicts_explainer.md` | The 7-class verdict taxonomy, plain-language, frozen since Gate A |
 | `docs/shipfile_worked_example.yaml` (+ `.md`) | A fuller worked `shipfile.yaml` than `shipgate init` generates |

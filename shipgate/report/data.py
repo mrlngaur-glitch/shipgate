@@ -160,6 +160,37 @@ class VerifyResult:
 
 
 @dataclass(frozen=True)
+class ReportInputScopeItem:
+    """Finding 8: one rendered Ship Report input, where it comes from, and whether it
+    falls inside `--verify`'s hash-chain re-derivation range. The enumeration is static
+    (it describes the report's own architecture), but it is carried on the data object so
+    rendering cannot accidentally omit it or invent a different list."""
+
+    input_name: str
+    source: str
+    covered_by_verify: bool
+
+
+#: Finding 8 systematic pass — every input rendered by the Ship Report, with its source
+#: and whether `--verify` re-derives a hash chain for it. `covered_by_verify=True` means
+#: the value is read from a table that `shipgate.ledger.integrity.verify_all_chains`
+#: walks (`events`, `claims`, or `verdicts`). `covered_by_verify=False` means the value is
+#: read from an unchained ledger table (`sessions`, `supersessions`) or from a plain file
+#: outside the ledger (`.shipgate/gate_unavailable.json`). The visible report must say so.
+REPORT_INPUT_SCOPE: tuple[ReportInputScopeItem, ...] = (
+    ReportInputScopeItem("Session selection", "sessions table", False),
+    ReportInputScopeItem("Claims", "claims table", True),
+    ReportInputScopeItem("Claim verdicts", "verdicts table", True),
+    ReportInputScopeItem("Latest gate evaluation", "events table", True),
+    ReportInputScopeItem("Blast radius count", "events table", True),
+    ReportInputScopeItem("Token totals", "events table", True),
+    ReportInputScopeItem("Ledger receipt", "verdicts table", True),
+    ReportInputScopeItem("Gate-unavailable marker", ".shipgate/gate_unavailable.json", False),
+    ReportInputScopeItem("Correction log", "supersessions table", False),
+)
+
+
+@dataclass(frozen=True)
 class ShipReportData:
     project_dir: Path
     session_id: str
@@ -171,6 +202,7 @@ class ShipReportData:
     tokens_output: int
     tokens_cache_read: int
     ledger_receipt: LedgerReceipt
+    verification_scope: tuple[ReportInputScopeItem, ...]
 
 
 def read_gate_unavailable_marker(project_dir: Path) -> GateUnavailableInfo | None:
@@ -322,14 +354,17 @@ def gather_report_data(project_dir: Path, writer: LedgerWriter, session_id: str)
         tokens_output=tokens_output,
         tokens_cache_read=tokens_cache_read,
         ledger_receipt=gather_ledger_receipt(conn),
+        verification_scope=REPORT_INPUT_SCOPE,
     )
 
 
 __all__ = [
     "RECEIPT_TABLE",
+    "REPORT_INPUT_SCOPE",
     "ClaimRow",
     "GateUnavailableInfo",
     "LedgerReceipt",
+    "ReportInputScopeItem",
     "ShipReportData",
     "VerifyResult",
     "find_green_inconsistency",

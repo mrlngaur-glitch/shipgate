@@ -257,6 +257,21 @@ def test_report_verify_wording_names_all_three_tables_on_a_healthy_chain(tmp_pat
     assert "events" in flat and "claims" in flat and "verdicts" in flat
 
 
+def test_report_shows_input_scope_and_marks_unchained_tables_not_covered(tmp_path):
+    """Finding 8 (Session 016, deferred): the rendered Ship Report enumerates every
+    rendered input, names its source, and states whether --verify covers it. The
+    deliberately unchained sessions and supersessions tables must be rendered as not
+    hash-chain-verified."""
+    _seed_evaluation(tmp_path, [_passing_command()])
+    result = runner.invoke(app, ["report", "--project-dir", str(tmp_path)])
+    flat = " ".join(result.output.split())
+    assert "Report input scope" in flat
+    assert "sessions table" in flat
+    assert "supersessions table" in flat
+    assert "No — not hash-chained" in flat
+    assert "Yes — hash chain" in flat
+
+
 def test_report_session_flag_overrides_the_default_most_recent_session(tmp_path):
     _seed_evaluation(tmp_path, [_passing_command()], session_id="s-old")
     _seed_evaluation(tmp_path, [_failing_command()], session_id="s-new")

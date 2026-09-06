@@ -275,3 +275,39 @@ def test_verify_receipt_reports_growth_since_generation_not_as_a_failure(tmp_pat
         result = verify_receipt(writer.connection, receipt)
     assert result.verified is True
     assert "newer" in result.detail
+
+
+def test_report_data_includes_verification_scope_for_every_rendered_input(tmp_path):
+    """Finding 8 (Session 016, deferred): every input the Ship Report renders is listed
+    in `ShipReportData.verification_scope`, with its source and whether `--verify`'s
+    hash-chain re-derivation covers it. Unchained tables (`sessions`, `supersessions`)
+    and the gate-unavailable marker must be honestly marked as not covered."""
+    with _ledger(tmp_path) as writer:
+        data = gather_report_data(tmp_path, writer, "s1")
+    names = {item.input_name: item for item in data.verification_scope}
+    assert set(names) == {
+        "Session selection",
+        "Claims",
+        "Claim verdicts",
+        "Latest gate evaluation",
+        "Blast radius count",
+        "Token totals",
+        "Ledger receipt",
+        "Gate-unavailable marker",
+        "Correction log",
+    }
+    assert names["Session selection"].input_name == "Session selection"
+    assert names["Session selection"].source == "sessions table"
+    assert names["Session selection"].covered_by_verify is False
+    assert names["Correction log"].input_name == "Correction log"
+    assert names["Correction log"].source == "supersessions table"
+    assert names["Correction log"].covered_by_verify is False
+    assert names["Gate-unavailable marker"].input_name == "Gate-unavailable marker"
+    assert names["Gate-unavailable marker"].source == ".shipgate/gate_unavailable.json"
+    assert names["Gate-unavailable marker"].covered_by_verify is False
+    assert names["Claims"].covered_by_verify is True
+    assert names["Claim verdicts"].covered_by_verify is True
+    assert names["Latest gate evaluation"].covered_by_verify is True
+    assert names["Blast radius count"].covered_by_verify is True
+    assert names["Token totals"].covered_by_verify is True
+    assert names["Ledger receipt"].covered_by_verify is True

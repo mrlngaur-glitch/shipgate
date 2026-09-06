@@ -32,6 +32,13 @@ choice below is a judgment call made and stated, not left implicit. In order, an
 6. **The receipt line is last, deliberately** — it's the "anyone can confirm this"
    guarantee (report §5.2/§15), which matters most to a reader who already trusts
    everything above enough to want to check it, not to the first-glance screenshot.
+7. **Finding 8 (Session 016, deferred): the report prints a scope table that enumerates
+   every rendered input, names its source, and states whether `--verify`'s hash-chain
+   re-derivation covers it.** The `sessions` and `supersessions` tables are deliberately
+   not hash-chained (see `hashing.py`); the Ship Report depends on `sessions` for session
+   selection, so that dependency is now visible rather than silently trusted. The scope
+   table is rendered even when `--verify` is off, because the distinction is about what
+   the report architecture actually checks, not about whether the user ran the flag.
 
 **Finding 7 fix (founder review, Session 015, a launch blocker): the banner cross-checks
 itself against the claims table before it renders GREEN, with no hashing and no
@@ -165,6 +172,21 @@ def _claims_table(data: ShipReportData) -> Table:
     return table
 
 
+def _scope_section(data: ShipReportData) -> Table:
+    # Finding 8: enumerate every rendered input, its source, and whether --verify's
+    # hash-chain re-derivation covers it. Static list from data.py, rendered so the
+    # visible report never claims more than what is actually checked.
+    table = Table(title="Report input scope (--verify coverage)", expand=True, show_lines=False)
+    table.add_column("Input")
+    table.add_column("Source")
+    table.add_column("Covered by --verify")
+
+    for item in data.verification_scope:
+        covered = "Yes — hash chain" if item.covered_by_verify else "No — not hash-chained"
+        table.add_row(item.input_name, item.source, covered)
+    return table
+
+
 def _blast_radius_line(data: ShipReportData) -> Text:
     # P11(b): identical wording whether the count is 0 or 12 — never a checkmark, never
     # "clean". See module docstring, point 4.
@@ -189,7 +211,7 @@ def _receipt_line(data: ShipReportData, verify_result: VerifyResult | None) -> T
 
     header = (
         f"Ledger receipt ({receipt.table}): #{receipt.first_id} ({receipt.first_row_hash[:12]}…) "
-        f"through #{receipt.last_id} ({receipt.last_row_hash[:12]}…) — this project's entire claim history."
+        f"through #{receipt.last_id} ({receipt.last_row_hash[:12]}…) — this project's claim-verdict history."
     )
     if verify_result is None:
         return Text(header + "\nNot independently re-checked this run — pass --verify to confirm.", style="")
@@ -210,6 +232,8 @@ def render_ship_report(data: ShipReportData, console: Console, *, verify_result:
 
     console.print()
     console.print(_claims_table(data))
+    console.print()
+    console.print(_scope_section(data))
     console.print()
     console.print(_blast_radius_line(data))
     console.print(_token_line(data))

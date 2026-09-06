@@ -6,9 +6,11 @@ into `rich` terminal output. See each module's own docstring for the full reason
 from __future__ import annotations
 
 from .data import (
+    REPORT_INPUT_SCOPE,
     ClaimRow,
     GateUnavailableInfo,
     LedgerReceipt,
+    ReportInputScopeItem,
     ShipReportData,
     VerifyResult,
     find_green_inconsistency,
@@ -20,9 +22,11 @@ from .data import (
 from .render import render_ship_report
 
 __all__ = [
+    "REPORT_INPUT_SCOPE",
     "ClaimRow",
     "GateUnavailableInfo",
     "LedgerReceipt",
+    "ReportInputScopeItem",
     "ShipReportData",
     "VerifyResult",
     "find_green_inconsistency",
