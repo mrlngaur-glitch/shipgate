@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Models Python\\shipgate_private\\.venv\\Scripts\\python.exe -m shipgate.hooks.pretooluse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Models Python\\shipgate_private\\.venv\\Scripts\\python.exe -m shipgate.hooks.posttooluse"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Models Python\\shipgate_private\\.venv\\Scripts\\python.exe -m shipgate.hooks.stop"
+          }
+        ]
+      }
+    ]
+  }
+}

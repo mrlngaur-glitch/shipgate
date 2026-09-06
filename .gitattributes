@@ -1,0 +1,51 @@
+# Every tracked file in this repo today is text (py/md/yaml/yml/toml/txt/lock/gitignore —
+# confirmed by `git ls-files`, no binaries tracked). Normalize all of it to LF on both
+# checkout and in the repo itself, on every platform, so a Windows dev checkout and CI's
+# Ubuntu runner never disagree on line endings.
+* text=auto eol=lf
+
+# --- Never-publish boundary -------------------------------------------------------
+# The control was real (this file's export-ignore list) with no enforcement behind it:
+# `git archive HEAD` with no path args shipped every path below until this line. Every
+# top-level path this repo tracks was enumerated and ruled on, one line of reasoning
+# each -- internal planning, financial, and analyst-process documents never shipped to
+# a stranger's clone, everything else (product code, tests, this repo's own dogfooding
+# config) shipped as normal. `tests/unit/test_archive_boundary.py` holds the executable
+# proof: it re-derives its own independent list of what should be excluded (not by
+# trusting this file's say-so) and asserts a real `git archive HEAD` run contains none
+# of it, plus a closed-world check that a future untracked-and-unruled path fails loud
+# rather than shipping by default. This file is itself tracked and NOT export-ignored —
+# the policy has to ship with the archive it governs, or a fresh clone has no way to
+# inherit it.
+#
+# Gotcha, found live and worth not re-discovering: a `.gitattributes` line splits on
+# whitespace into `pattern attr1 attr2 ...`, so a filename containing a literal space
+# ("Revenue forecast.txt" below) cannot be a plain unquoted pattern token -- it silently
+# parses as pattern "Revenue" plus two bogus attributes, and the file still ships,
+# despite the export-ignore line being present and looking correct. Backslash-escaping
+# the space (`Revenue\ forecast.txt`) does NOT fix this either -- confirmed directly via
+# `git check-attr export-ignore -- "Revenue forecast.txt"` still returning `unspecified`.
+# The only form that actually works is C-quoting the whole pattern
+# ("Revenue forecast.txt" export-ignore, as below) -- confirmed via `git check-attr`
+# returning `set`, and via a real `git archive HEAD` run no longer containing the file.
+# If a future export-ignore line looks present but the archive still ships the file,
+# re-run `git check-attr export-ignore -- "<path>"` before assuming the mechanism itself
+# is broken -- it is very likely this exact whitespace-parsing trap again.
+#
+# Internal planning / financial / analyst-process documents — never shipped to a
+# stranger's clone:
+"Revenue forecast.txt" export-ignore
+final_ShipGate_Master_Report_v4_FINAL.md export-ignore
+CLAUDE.md export-ignore
+PHASE_PLAN.md export-ignore
+SESSION_LOG.md export-ignore
+PARKING_LOT.md export-ignore
+ANALYST_DISCIPLINE_CHARTER.md export-ignore
+Archive/ export-ignore
+docs/REPORT_REVIEW_2026-08-15.md export-ignore
+docs/analyst_briefs/ export-ignore
+".windsurfrules" export-ignore
+"README_STRUCTURE.md" export-ignore
+docs/launch_assets.md export-ignore
+docs/README_draft_proposed.md export-ignore
+"v3 research on controlling ai for best output.txt" export-ignore

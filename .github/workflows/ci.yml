@@ -1,0 +1,361 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 (node24; v4.4.0 was node20, deprecated)
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0 (node24; v5.6.0 was node20, deprecated)
+        with:
+          python-version: "3.12"
+
+      - name: Install (pinned, hash-verified)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.lock
+          pip install -e . --no-deps
+
+      # ---------------------------------------------------------------
+      # Anti-vacuous gate.
+      # ShipGate's flagship rule is that a check observing nothing never
+      # renders green. If our OWN suite could pass on zero collected tests,
+      # we would fail our own litmus before shipping a single verdict.
+      # This is the first thing a hostile reader will check.
+      # ---------------------------------------------------------------
+      - name: Assert the test suite is not vacuous
+        run: |
+          COLLECTED=$(python -m pytest --collect-only -q 2>/dev/null | grep -c '::' || true)
+          echo "Collected tests: $COLLECTED (minimum: $MIN_TESTS)"
+          if [ "$COLLECTED" -lt "$MIN_TESTS" ]; then
+            echo "::error::VACUOUS SUITE — collected $COLLECTED tests, minimum is $MIN_TESTS."
+            echo "A green build that observed nothing is not a green build."
+            exit 1
+          fi
+        env:
+          # Raise this as the suite grows. It must never be lowered to make CI pass —
+          # lowering it is a silently moved goalpost.
+          #
+          # Running total, each addition tied to the real test file and the real gap
+          # it closed, verified via `pytest --collect-only -q | grep -c '::'` locally
+          # each time:
+          #   328 baseline
+          # + 3  tests/unit/test_checkers.py — undecodable-byte decode-fix regression
+          #      tests (+2) and the command_succeeds unhandled-thread-exception
+          #      hygiene test (+1)
+          # + 2  tests/unit/test_pytest_reporter.py — an A/B/C repro proving
+          #      collect_test_count/run_pytest survive a conftest that prints a byte
+          #      the host locale can't decode
+          # + 5  tests/unit/test_gate_orchestrator.py — the full A/B/C control against
+          #      evaluate_gate directly (+3), plus the fail-closed dispatch wrapper
+          #      proven independently of decoding (+2)
+          # + 1  tests/integration/test_hooks_e2e.py — the same A/B/C control C,
+          #      through a real `python -m shipgate.hooks.stop` subprocess
+          # = 339 — a regression in the frozen verdict path, fixed and demonstrated live
+          # + 5  tests/integration/test_hooks_e2e.py — the Stop hook's outer fail-open
+          #      catch also swallowed a broken ledger; escalation from
+          #      silent-but-recorded to a loud block, tested against real
+          #      corrupted/occupied/ACL-denied .shipgate state
+          # + 5  tests/unit/test_hooks.py — the marker helpers and the escalation
+          #      sequence exercised directly
+          # = 349
+          # + 16 tests/unit/test_report.py — the Ship Report's data layer: real
+          #      red/green evaluations, the blast-radius count and ledger receipt, the
+          #      gate-unavailable marker, --verify pass/tamper/growth
+          # + 14 tests/unit/test_cli_report.py — status/report exit codes, --verify
+          #      wiring, and a corrupt-ledger-crashed-into-a-traceback gap found live
+          #      while demonstrating the build
+          # + 1  tests/unit/test_hooks.py — the end-to-end secret-as-a-dict-key
+          #      redaction test
+          # = 380
+          # + 2  tests/unit/test_report.py — verify_receipt catching a real tampered
+          #      `events` row, not just `verdicts`, plus the "names all three tables"
+          #      wording check
+          # + 5  net new, tests/unit/test_cli_report.py — 6 added (an events-tamper
+          #      repro against report and status, the --verify events-naming check,
+          #      the healthy-chain wording check, and the --verify-defaults-on /
+          #      --no-verify split); 1 removed (the old verify-is-opt-in test,
+          #      superseded by the defaults-on pair)
+          # = 387 — a subtotal, closing a launch-blocking gap before this project's own
+          #   completion gate was allowed to certify itself. Superseded below — this is
+          #   no longer the current count.
+          # + 5  tests/unit/test_hooks.py — the unresolvable-cwd Gate C blocker: a
+          #      parametrized no-directory-created + non-empty-stderr regression across
+          #      all three hooks (+3), the cwd-is-a-file-not-a-directory edge case (+1),
+          #      and open_project_ledger's own ProjectRootUnresolvableError raised
+          #      directly, isolated from any one hook's wrapping (+1)
+          # + 1  tests/unit/test_cli_declare_task_class.py — requirement (c): the
+          #      NoSessionRecordedError message names the unresolvable-cwd possibility
+          #      honestly instead of asserting hooks simply haven't fired yet
+          # = 393 — a subtotal. Superseded below — this is no longer the current count.
+          # + 3  tests/integration/test_hooks_e2e.py — the stdin-decode fix (P24): two
+          #      real cp932/ascii-host regressions proving the Stop hook still blocks
+          #      on genuine non-ASCII payload bytes, plus a genuinely-malformed-UTF-8
+          #      case sent on real stdin, asserting a refusal, not a crash
+          # + 1  tests/unit/test_verdicts.py — the ALL_VERDICTS-out-of-sync-with-the-
+          #      enum regression: patches a real 8th Verdict member into an isolated
+          #      copy of taxonomy.py and asserts the import itself refuses it
+          # = 397 — a subtotal. Superseded below — this is no longer the current count.
+          # + 16 tests/unit/test_analyze.py — the new `shipgate analyze` command's six
+          #      hard constraints (read-only, every ledger verified, the vacuous-pass
+          #      rule, never printing raw payloads, no network, dogfood-corpus
+          #      out-of-scope), plus discovery/aggregation. (Corrected count: this line
+          #      originally said 21, misattributing 5 of test_cli_analyze.py's own
+          #      tests to this file — the arithmetic below never actually summed to the
+          #      MIN_TESTS value it produced. 16 + 5 = 21 is the real split; found
+          #      re-deriving this comment for the README pass, not by the founder.)
+          # + 5  tests/unit/test_cli_analyze.py — the CLI wrapper's exit codes and
+          #      repeatable --roots wiring
+          # = 418 — a subtotal. Superseded below — this is no longer the current count.
+          # + 7  tests/unit/test_analyze.py — Findings 1 and 2 (founder review, real-
+          #      data verification against a real ledger): the activity window and
+          #      token totals were hand-seeded with columns production never
+          #      populates, hiding both defects; one new test drives the real
+          #      shipgate.hooks.pretooluse subprocess to build its fixture, the rest
+          #      cover the corrected TokenMetric/AggregatedTokenMetric mechanism
+          # = 425 — a subtotal. Superseded below — this is no longer the current count.
+          # + 4  tests/unit/test_archive_boundary.py — the never-publish export-ignore
+          #      boundary (P31): two closed-world enumeration tests (a new top-level
+          #      or docs/ path with no publish/never-publish ruling fails loud), one
+          #      vacuous-pass guard on the archive command itself, one real
+          #      `git archive HEAD` invocation asserting zero never-publish members —
+          #      confirmed to actually go red by reintroducing the real bug this
+          #      session found (an unescaped space silently defeating a pattern) on a
+          #      throwaway branch, then discarding it; this floor rose from the fix,
+          #      not a padded count.
+          # = 429 — a subtotal. Superseded below — this is no longer the current count.
+          #
+          # ---------------------------------------------------------------------------
+          # Doc-sync record (2026-08-19). README.md / SECURITY.md's own prose has now
+          # drifted from this exact suite-size number three separate times.
+          # tests/unit/test_docs_reality.py checks
+          # both files' "this commit" test-count claims against this ledger's own
+          # MIN_TESTS mechanically, instead of relying on a human remembering to grep
+          # for every stale digit by hand.
+          #
+          # The same test also checks every non-historical GitHub Actions run URL
+          # README.md/SECURITY.md cite against LATEST_CI_RUN_ID below -- the one thing
+          # this repo can record about "the most recent run" without a network call.
+          # This is NOT queried live from GitHub (no network calls from tests, matching
+          # the hooks' own no-network rule) -- it is a value updated BY HAND, at the
+          # same time as MIN_TESTS, whenever a new CI run's result is folded into the
+          # docs' prose. A citation of a deliberately-historical run (e.g. "the first
+          # real run ever") is exempt from this check by an explicit, reasoned allowlist
+          # in the test file itself, not by any inference this comment or that test can
+          # make on its own.
+          LATEST_CI_RUN_ID: "34025172117"  # CI's 7th real run -- see SECURITY.md's own run history
+          # ---------------------------------------------------------------------------
+          # + 3  tests/unit/test_docs_reality.py — the doc-sync mechanism above: (1)
+          #      MIN_TESTS vs. the actual `pytest --collect-only` count must already
+          #      agree with each other before either is trusted against the docs, (2)
+          #      every "this commit" test-count claim in README.md matched against real
+          #      collected count via one literal anchor per claim, not a blanket
+          #      digit-scan, (3) every non-exempt GitHub Actions run URL in README.md/
+          #      SECURITY.md matches LATEST_CI_RUN_ID above. Watched RED against the
+          #      stale "425" prose before README.md/SECURITY.md were corrected in the
+          #      same session (the assertion messages themselves name the exact stale
+          #      value found).
+          # = 432 — a subtotal. Superseded below — this is no longer the current count.
+          # + 5  tests/unit/test_latency_bench.py — task 3.6's own vacuous-pass guard
+          #      (PHASE_PLAN.md 3.6, binding constraint 2): the nearest-rank percentile
+          #      helper against known data, the guard refusing a below-floor sample
+          #      count before spawning anything, the guard firing on a REAL subprocess
+          #      (`tests/fixtures/noop_hook.py`) that exits 0 but never touches the
+          #      ledger, and a negative control proving the same guard does NOT fire
+          #      against the real `pretooluse` hook doing real work.
+          # = 437 — a subtotal. Superseded below — this is no longer the current count.
+          # + 1  tests/unit/test_analyze.py — founder-found discovery defect: `--roots
+          #      <single-project-dir>` (the most obvious first invocation) returned
+          #      nothing, because discover_ledgers only ever globbed a root's
+          #      subdirectories, never the root's own .shipgate/ledger.db
+          # + 3  tests/unit/test_analyze.py — founder-found statistics-integrity defect:
+          #      a synthetic perf fixture (2000 sessions, one identical timestamp) was
+          #      aggregated as an ordinary "100% green" project; ProjectStats.
+          #      looks_synthetic flags the data-derived signature (>1 session sharing one
+          #      identical first/last-activity timestamp) and render.py excludes it,
+          #      named not silently, from the cross-project totals
+          # = 441 — a subtotal. Superseded below — this is no longer the current count.
+          # + 2  tests/unit/test_docs_reality.py — the doc-sync mechanism closes the one
+          #      gap Defect 1 (P34) proved was still open: README.md row 10's hand-typed
+          #      "committed run measured N ms" and benchmarks/RESULTS.md's own generated
+          #      header are now anchored against benchmarks/results/latest.json (the
+          #      actual data artifact), not left to drift silently the next time
+          #      benchmarks/ is regenerated without re-pasting both by hand.
+          # = 443 — a subtotal. Superseded below — this is no longer the current count.
+          # + 8  tests/unit/test_checkers.py — the Sixth founder finding (two real
+          #      pilot-verdict defects, found by testing the self-gating proposal
+          #      instead of reading it): 4 direct unit tests of the fixed
+          #      _pytest_extra_args tokenizer (the pilots' own literal backslash-path
+          #      command shape, a quoted-path form, forward-slash/bare forms
+          #      unchanged, a genuine non-pytest command still rejected), 2 for
+          #      check_tests_pass (the exact pilot command shape against a real
+          #      venv with no pytest installed renders unverified-vacuous, not
+          #      contradicted — proven RED against the pre-fix code before the fix
+          #      landed; a real failure through the same command shape still renders
+          #      contradicted, the negative control), 2 for check_command_succeeds
+          #      (a real, reproduced "ruff not on PATH" case renders unverified, not
+          #      contradicted — also proven RED before the fix; a real resolvable
+          #      failure still renders contradicted).
+          # = 451 — the count as of the Sixth founder finding
+          #
+          # +7 — Seventh founder finding (the Sixth founder finding's own fix
+          #      introduced a new false-GREEN: check_tests_pass recognized an
+          #      explicitly-named interpreter path but reporters.pytest_reporter.
+          #      run_pytest still silently substituted sys.executable, crediting
+          #      this gate's own venv/suite to a path that may not even exist —
+          #      reproduced live in a real pilot project's own data). 2 direct tests of
+          #      reporters.pytest_reporter's new base_argv parameter (a
+          #      nonexistent base_argv executable raises OSError through both
+          #      collect_test_count and run_pytest, proving it's genuinely
+          #      threaded through, not silently ignored) + 1 confirming
+          #      PytestResult.command reflects the provided base_argv. 4 in
+          #      shipgate.gate.checkers: the causally-correct version of the
+          #      named-interpreter-with-pytest-absent test (a real test file
+          #      present this time, so a wrongly-substituted sys.executable WOULD
+          #      render a false verified — proven RED against the pre-fix code);
+          #      the founder's own literal nonexistent-interpreter repro (must
+          #      render unverified, never verified); the recorded-reason test
+          #      (evidence must name both the shipfile command and what actually
+          #      ran); and the pytest_executable-path shape (a shipfile naming
+          #      pytest's own executable directly, not python -m pytest).
+          # = 458 — a subtotal. Superseded below — this is no longer the current count.
+          #
+          # + 8 — PHASE_PLAN.md P40 (hook-installed self-poisoning, PHASE_PLAN.md P38 item
+          #      3, fixed at the root): shipgate/gate/checkers.py's check_runtime_evidence
+          #      searched EVERY event indiscriminately, including record_type='gate_evaluation'
+          #      (which embeds a prior CONTRADICTED reason quoting the exact marker it
+          #      searched for) — a real false-GREEN mechanism, reproduced live via a real
+          #      two-write ledger sequence before being fixed. Fixed with an explicit
+          #      allowlist of genuinely-observed record types (pretooluse_hook,
+          #      posttooluse_hook, stop_hook), never a denylist of the gate's own
+          #      self-generated ones. tests/unit/test_checkers.py: 3 negative-control tests
+          #      (one per allowlisted type, proving the fix didn't collapse into never
+          #      finding anything real), 4 parametrized tests enumerating the full closed
+          #      set of excluded self-generated record types (gate_evaluation,
+          #      gate_shipfile_invalid, high_risk_change, high_risk_change_refused), 1
+          #      reproducing the exact P38 sequence end-to-end (a real CONTRADICTED reason
+          #      written into a real gate_evaluation event, then asserting a second
+          #      evaluation still renders CONTRADICTED, not a false VERIFIED) — confirmed
+          #      RED against the pre-fix code first (git stash on checkers.py alone), all
+          #      5 new/changed assertions failing for the stated reason, not a stub error.
+          # = 466 — the current count
+          MIN_TESTS: 466
+
+      - name: Tests
+        run: python -m pytest
+
+      # ---------------------------------------------------------------
+      # Latency covenant benchmark (task 3.6; report §5.5 item 4).
+      #
+      # Two failure modes this step must NOT produce, decided and stated here rather
+      # than discovered after a red run:
+      #
+      # 1. A vacuous benchmark (zero real samples, or a hook path that silently ran
+      #    without writing to the ledger) reporting a fast, meaningless p99 as a pass —
+      #    `benchmarks/latency_bench.py`'s own guard makes this a HARD failure
+      #    (`VacuousBenchmarkError`, exit 2). This step's exit code IS gated on that —
+      #    a broken harness must fail the build.
+      # 2. A flaky hard-fail on a shared, noisy CI runner when the measured p99 crosses
+      #    10ms by a small, non-repeatable margin — the exact case the flake-quarantine
+      #    rule exists for ("flaky checks degrade to advisory, never hard-block").
+      #    `latency_bench.py` itself exits 0 whenever it produced a REAL, non-vacuous
+      #    result, whether or not that result clears the target; the PASS/FAIL verdict
+      #    against 10ms is written to this run's job summary (`$GITHUB_STEP_SUMMARY`)
+      #    and to `benchmarks/RESULTS.md`/`benchmarks/results/latest.json` for a human
+      #    to read and act on, but does not by itself fail this CI job.
+      #
+      # 500 samples per measured path (baseline + PreToolUse + PostToolUse) — see
+      # `latency_bench.py`'s own docstring, "Sample count," for why fewer would not be a
+      # real p99 estimate.
+      - name: Latency benchmark (task 3.6)
+        run: python -m benchmarks.latency_bench --samples 500
+
+      # ---------------------------------------------------------------
+      # Core purity.
+      # Converts "the core has no Claude-Code-specific imports" from an
+      # intention into a hard rule — the guarantee that lets a new coding
+      # agent get its own adapter built quickly, without touching the core.
+      # ---------------------------------------------------------------
+      - name: Core purity contract
+        run: lint-imports
+
+      - name: Lint
+        run: ruff check .
+
+      # ---------------------------------------------------------------
+      # Dependency audit — "pinned + audited deps".
+      # Pinning alone (requirements.lock) says these exact versions were chosen
+      # deliberately; it says nothing about whether a chosen version has a KNOWN
+      # vulnerability disclosed after it was pinned. This closes that gap, continuously.
+      #
+      # pip-audit is installed into a REAL, SEPARATE venv, not this job's shared
+      # Python — deliberately NOT added to requirements.lock / pyproject.toml's own
+      # dependency list — every dependency addition is treated as a
+      # supply-chain decision, and pip-audit pulls in ~20 transitive packages of its
+      # own (an HTTP client, a CycloneDX SBOM library, etc.) that this project's actual
+      # shipped surface has no other reason to carry.
+      #
+      # This step used to install pip-audit into this job's own shared Python,
+      # commented as "scoped to this one CI step's own throwaway environment" — false:
+      # requirements.lock and requirements-audit.lock share 6 packages, and one of them
+      # (Pygments: 2.20.0 vs 2.21.0) disagreed, so the old single-environment install put
+      # the project venv itself one version off its own lock the moment this step ran —
+      # the exact single-package-drift failure the whole hash-pinning effort exists to
+      # prevent, reintroduced by the fix meant to close the last gap in it. `python -m venv
+      # "$RUNNER_TEMP/auditenv"` below is the actual fix — not aligning the one
+      # colliding pin, which would leave the other 5 shared packages free to diverge
+      # on the next version bump. A comment describing a control is a claim, and claims
+      # get verified — this comment was rewritten to describe what the YAML actually
+      # does, found by that same standard applied to this file.
+      #
+      # Hash-pinned in requirements-audit.lock, its own file: this step runs with
+      # GITHUB_TOKEN in scope, installing from an artifact nothing verified, and it is
+      # the one check whose whole job is to find a hidden problem — exactly where you'd
+      # want one hidden. requirements-audit.lock's own header explains why it's kept
+      # separate from requirements.lock rather than merged into it.
+      - name: Audit dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/auditenv"
+          "$RUNNER_TEMP/auditenv/bin/pip" install --require-hashes -r requirements-audit.lock
+          "$RUNNER_TEMP/auditenv/bin/pip-audit" -r requirements.lock
+
+  attest:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip
+          pip wheel . -w dist --no-deps
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45  # v2
+        with:
+          subject-path: "dist/*.whl"
+
+      - name: Upload attested wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: shipgate-wheel
+          path: dist/*.whl
+          if-no-files-found: error

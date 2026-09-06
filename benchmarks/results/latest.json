@@ -1,0 +1,37 @@
+{
+  "generated_at": "2026-08-19T22:50:52Z",
+  "python_executable": "D:\\Models Python\\ShipGate\\.venv\\Scripts\\python.exe",
+  "platform": "win32",
+  "sample_count": 500,
+  "target_p99_ms": 10.0,
+  "baseline": {
+    "label": "baseline: bare interpreter startup",
+    "n": 500,
+    "mean_ms": 50.552,
+    "p50_ms": 49.735,
+    "p95_ms": 60.769,
+    "p99_ms": 69.584,
+    "max_ms": 78.489
+  },
+  "hooks": [
+    {
+      "label": "shipgate.hooks.pretooluse",
+      "n": 500,
+      "mean_ms": 94.809,
+      "p50_ms": 90.617,
+      "p95_ms": 110.707,
+      "p99_ms": 173.242,
+      "max_ms": 480.264
+    },
+    {
+      "label": "shipgate.hooks.posttooluse",
+      "n": 500,
+      "mean_ms": 94.749,
+      "p50_ms": 92.968,
+      "p95_ms": 106.739,
+      "p99_ms": 122.906,
+      "max_ms": 155.395
+    }
+  ],
+  "passes_target": false
+}
