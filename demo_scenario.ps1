@@ -3,6 +3,16 @@
 
 $ErrorActionPreference = "Stop"
 
+# Use this clone's own .venv when it exists. README's Windows install creates `.venv` but
+# never activates it, and every command below (`shipgate`, `pytest`, `python`) is bare,
+# so without this a stranger following README literally got "'shipgate' is not
+# recognized" at Step 3 -- or worse, a different Python than the one ShipGate was
+# installed into. Found by the public re-sync's stranger re-run, 2026-09-22.
+$venvScripts = Join-Path $PSScriptRoot ".venv\Scripts"
+if (Test-Path (Join-Path $venvScripts "python.exe")) {
+    $env:Path = "$venvScripts;$env:Path"
+}
+
 Write-Host "=== ShipGate Demo Scenario ===" -ForegroundColor Cyan
 Write-Host ""
 
@@ -47,7 +57,23 @@ $json = @{
     permission_mode = "tool"
     stop_hook_active = $false
 } | ConvertTo-Json
-$json | python -m shipgate.hooks.stop
+# Windows PowerShell 5.1 prepends a UTF-8 BOM when piping to a native program whenever the
+# console runs UTF-8 (code page 65001, e.g. Windows' "UTF-8 for worldwide language support"),
+# even from a -NoProfile shell -- and the Stop hook deliberately rejects undecodable input
+# rather than guess (it skips, never blocks). Claude Code itself sends no BOM; this is only
+# the demo's own pipe. Both settings are needed (either alone still sent the BOM, reproduced
+# 2026-09-22); the console's own setting is restored straight after.
+$savedInputEncoding = [Console]::InputEncoding
+$savedOutputEncoding = $OutputEncoding
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+try {
+    [Console]::InputEncoding = $utf8NoBom
+    $OutputEncoding = $utf8NoBom
+    $json | python -m shipgate.hooks.stop
+} finally {
+    [Console]::InputEncoding = $savedInputEncoding
+    $OutputEncoding = $savedOutputEncoding
+}
 
 Write-Host ""
 Write-Host "Step 7: Check gate status" -ForegroundColor Yellow

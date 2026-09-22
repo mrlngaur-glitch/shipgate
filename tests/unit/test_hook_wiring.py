@@ -195,6 +195,25 @@ def _write_raw_settings(project_dir: Path, command: str, *, event: str = "PreToo
     (settings_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
 
 
+def _interpreter_that_breaks_unquoted(tmp_path: Path) -> str:
+    """A real, existing interpreter path that any POSIX-style shell mangles when unquoted.
+
+    On Windows `sys.executable` already is one (backslashes are stripped as escapes --
+    see the next test's docstring). **Found by the first public CI run, 2026-09-22
+    (Linux):** a POSIX `sys.executable` (e.g. `/opt/.../bin/python`) has neither a space
+    nor a backslash, runs fine unquoted, and silently made the tests below assert a
+    Windows-only fact. There, a symlink to the real interpreter is placed under a
+    directory whose name contains a space -- the original live bug's shape -- so the
+    unquoted form fails at the shell on every platform, for the same reason."""
+    if sys.platform == "win32":
+        return sys.executable
+    spaced_dir = tmp_path / "dir with space"
+    spaced_dir.mkdir()
+    link = spaced_dir / "python"
+    link.symlink_to(sys.executable)
+    return str(link)
+
+
 def test_unquoted_interpreter_path_with_a_space_is_caught_by_the_real_shell_check(tmp_path: Path):
     """The live bug (Session 048, pilot project, 2026-09-21), reproduced with the real
     interpreter this test process runs under. Claude Code runs hook commands through
@@ -216,7 +235,7 @@ def test_unquoted_interpreter_path_with_a_space_is_caught_by_the_real_shell_chec
     argv-parse check (`_interpreter_and_module`) could not catch either shape: it never
     executes anything through a shell, only stats the interpreter file and runs it
     directly as an argv list."""
-    unquoted_command = f"{sys.executable} -m shipgate.hooks.pretooluse"
+    unquoted_command = f"{_interpreter_that_breaks_unquoted(tmp_path)} -m shipgate.hooks.pretooluse"
 
     _write_raw_settings(tmp_path, unquoted_command)
     report = check_hook_wiring(tmp_path)
@@ -249,7 +268,7 @@ def test_doctor_red_then_green_after_shipgate_init_repairs_a_stale_unquoted_entr
     re-run repairs it in place, and the identical project goes doctor-green."""
     from shipgate.discipline.init import run_init
 
-    unquoted_command = f"{sys.executable} -m shipgate.hooks.pretooluse"
+    unquoted_command = f"{_interpreter_that_breaks_unquoted(tmp_path)} -m shipgate.hooks.pretooluse"
     _write_raw_settings(tmp_path, unquoted_command)
 
     red = check_hook_wiring(tmp_path)

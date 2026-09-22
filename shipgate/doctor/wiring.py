@@ -44,6 +44,7 @@ does not invent a new one.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -172,7 +173,18 @@ def _locate_git_bash() -> str | None:
     install root independent of `PATH` ordering — the same technique other Windows dev
     tools (e.g. VS Code) use to locate Git Bash reliably. Returns `None`, never a guess,
     if git itself isn't found or the derived `bash.exe` doesn't exist — callers must
-    treat that as "could not verify," not as a failure of the hook being checked."""
+    treat that as "could not verify," not as a failure of the hook being checked.
+
+    **Fourth finding, 2026-09-22 (the first public CI run of this check, Linux):
+    everything above is Windows-only reasoning, and the function applied it
+    everywhere.** On Linux/macOS there is no `bash.exe` under a Git-for-Windows root,
+    so this returned `None` on every non-Windows machine: the shell check was always
+    skipped, and every Linux/macOS user got a warning to "install Git for Windows".
+    The System32/WSL-launcher trap it guards against does not exist off Windows, so
+    there `bash` resolved from `PATH` is the real shell. Still `None`, never a guess,
+    if no `bash` is found."""
+    if os.name != "nt":
+        return shutil.which("bash")
     git_path = shutil.which("git")
     if git_path is None:
         return None
@@ -358,9 +370,11 @@ def check_hook_wiring(project_dir: Path) -> WiringReport:
             # `_locate_git_bash`'s docstring for why a lesser resolution was rejected.
             issues.append(HookWiringIssue(
                 "*", "warn",
-                "could not locate a real Git Bash install (via `git --exec-path`) to run the "
-                "real shell-execution check with — skipping it; the interpreter/import checks "
-                "above still ran. Install Git for Windows, or ensure `git` resolves on PATH.",
+                "could not locate a real bash (on Windows: Git Bash, via `git --exec-path`; "
+                "elsewhere: `bash` on PATH) to run the real shell-execution check with — "
+                "skipping it; the interpreter/import checks above still ran. On Windows, "
+                "install Git for Windows or ensure `git` resolves on PATH; elsewhere, ensure "
+                "`bash` resolves on PATH.",
             ))
         else:
             with tempfile.TemporaryDirectory(prefix="shipgate-doctor-shell-probe-") as scratch_dir:
