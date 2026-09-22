@@ -46,8 +46,26 @@ NEVER_PUBLISH_TOP_LEVEL = {
     "PHASE_PLAN.md",
     "SESSION_LOG.md",
     "PARKING_LOT.md",
+    "BACKLOG.md",  # the analyst's current open-items list (2026-09-22) -- names launch
+                   # dates, founder-only decisions and other projects' pending issues;
+                   # same class as PHASE_PLAN.md/PARKING_LOT.md, ruled never-publish the
+                   # same session it was written, before it was ever committed
+    "BACKTEST_CRITERIA.md",  # founder-signed launch criteria (P45, 2026-09-22) -- internal
+                             # launch-decision material naming the founder's own projects;
+                             # same class as PHASE_PLAN.md, ruled never-publish at creation
     "ANALYST_DISCIPLINE_CHARTER.md",
     "Archive",  # directory -- prefix-matched in the archive check below
+    "analyst_inbox",  # directory -- pilot/fleet correspondence from OTHER projects, sent
+                      # to this analyst in confidence: their deadlines, live-money dates,
+                      # strategy detail and internal defect registers. Not ShipGate
+                      # documentation and not ours to publish. Ruled never-publish 2026-09-11,
+                      # the same session the directory was first tracked; this closed-world
+                      # check is what caught it unruled, exactly as designed
+    "analyst_outbox",  # directory -- this analyst's own replies to other fleet/pilot
+                       # projects, referencing the same private operational detail
+                       # (their paths, their ledger contents) as analyst_inbox above.
+                       # Ruled never-publish 2026-09-21 (Session 049), the same session
+                       # the directory was first written, before it was ever committed
     ".windsurfrules",  # Windsurf/Devin analyst operating rules -- carries the same
                         # class of internal strategy/process content as CLAUDE.md,
                         # for the same tool-config purpose; same ruling as CLAUDE.md
@@ -60,6 +78,16 @@ NEVER_PUBLISH_TOP_LEVEL = {
                              # same class as the other internal-process docs above, added
                              # to the repo 2026-09-01, ruled never-publish this session
                              # (Session 036) when the closed-world check caught it unruled
+    "Devin_improvement suggestions_shipgate.md",  # analyst cross-review of the v3 research
+                             # against ShipGate capabilities -- internal working material,
+                             # references the never-publish v3 research file and the private
+                             # source tree; not meant for a public audience
+    "Claude_improvement suggestions_shipgate.md",  # this analyst's independent cross-review
+                             # of the same v3 research -- same class as Devin's review above:
+                             # references the never-publish v3 research file and internal
+                             # repo state; committed Session 041, missed by that session's
+                             # own closed-world check (caught and fixed the same session it
+                             # was committed, not a later one)
 }
 
 # Every other top-level path this repo tracks, ruled publish this session (P31).
@@ -108,8 +136,15 @@ NEVER_PUBLISH_DOCS_CHILDREN = {
                                   # kept separate from the real, already-public README.md;
                                   # internal review material until the founder approves
                                   # publishing it explicitly
+    "local_fleet_rollout.md",  # founder-specific operational runbook (Session 041) --
+                                # references the founder's own local folder paths
+                                # (D:\Models Python\<sub-project>) and personal multi-project
+                                # setup; not generic product documentation
 }
 PUBLISHED_DOCS_CHILDREN = {
+    "demo_recording.md",  # launch-demo GIF/screenshot toolchain notes (Session 041) --
+                           # generic tooling instructions (VHS install + tape script),
+                           # no founder-specific or internal-strategy content
     "jsonl_format_notes.md",
     "ledger_schema_design.md",
     "QUICKSTART.md",  # expanded install -> init -> first session -> status/report

@@ -707,15 +707,48 @@ def iter_scanned_files(project_root: Path, paths: list[str]):
     `inventory_complete` already used privately, now shared with
     `shipgate.gate.orchestrator`'s content-fingerprint computation so there is one
     definition of "which files this project's scan-based checks look at," not two that
-    could silently drift apart."""
+    could silently drift apart.
+
+    **Pilot finding, 2026-09-11 (pilot project) — this walk was the second half of the
+    Stop-hook cost, and it was pure waste.** The previous implementation used
+    `target.rglob("*")` and then discarded ignored directories *after* descending into
+    them, plus one `is_file()` stat syscall per candidate. So every `.git` object, every
+    `.venv` site-package and every `node_modules` entry was enumerated in full and then
+    thrown away, on every scan-based check.
+
+    Replaced with `os.walk` pruning `IGNORED_DIR_NAMES` from `dirnames` **in place**,
+    which stops the descent before it happens, and taking filenames from the directory
+    read itself rather than re-stat'ing each one. Measured on the pilot's tree,
+    warm-cache, two consecutive runs each, **identical file set (17,694 files) both
+    ways**: `rglob` 5.63s / 6.20s → pruned `os.walk` 0.07s / 0.07s.
+
+    `dirnames` and `filenames` are sorted so the yield order is deterministic
+    (ascending path order within each directory, parents before children). The previous
+    implementation's order was whatever `rglob` happened to produce; callers that
+    report match lists now get a stable order rather than an incidental one."""
     for rel in paths:
         target = project_root / rel
         if target.is_file():
             yield target
         elif target.is_dir():
-            for candidate in target.rglob("*"):
-                if candidate.is_file() and not (IGNORED_DIR_NAMES & set(candidate.relative_to(project_root).parts)):
-                    yield candidate
+            # Behaviour-preserving guard. The previous implementation filtered each
+            # candidate on its parts relative to PROJECT_ROOT, so an explicitly-listed
+            # path that itself sat under an ignored directory (paths: [".venv/pkg"])
+            # yielded nothing at all. Pruning `dirnames` alone would not reproduce that,
+            # because the ignored component is above the walk root, never in `dirnames`.
+            try:
+                target_parts = set(target.resolve().relative_to(project_root.resolve()).parts)
+            except ValueError:
+                target_parts = set()  # outside project_root -- no ignore-by-ancestry to apply
+            if IGNORED_DIR_NAMES & target_parts:
+                continue
+            for dirpath, dirnames, filenames in os.walk(target):
+                # In-place mutation is load-bearing, not style: os.walk only honours a
+                # pruned `dirnames` if the SAME list object is modified.
+                dirnames[:] = sorted(d for d in dirnames if d not in IGNORED_DIR_NAMES)
+                here = Path(dirpath)
+                for filename in sorted(filenames):
+                    yield here / filename
         # a path that doesn't exist yields nothing -- feeds the vacuous count honestly,
         # rather than being treated as an error or silently skipped
 

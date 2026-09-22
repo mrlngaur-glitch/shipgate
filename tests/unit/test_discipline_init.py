@@ -19,10 +19,13 @@ _TEST_CMD = "python -m pytest"
 #: The commands `init` actually emits — Session 010's fix: the absolute interpreter path
 #: this test process itself runs under, never the bare string "python" (a Gate C blocker
 #: the founder caught: wrong "python" resolution + hooks' own fail-open design meant a
-#: dead hook and a working one were indistinguishable to the user).
-_EXPECTED_PRETOOLUSE_COMMAND = f"{sys.executable} -m shipgate.hooks.pretooluse"
-_EXPECTED_POSTTOOLUSE_COMMAND = f"{sys.executable} -m shipgate.hooks.posttooluse"
-_EXPECTED_STOP_COMMAND = f"{sys.executable} -m shipgate.hooks.stop"
+#: dead hook and a working one were indistinguishable to the user). Quoted since
+#: Session 048 (pilot project, 2026-09-21, P0): Claude Code runs hook commands through Git
+#: Bash on Windows, and an unquoted path with a space (every real path in this fleet)
+#: fails at the shell before Python is ever reached — see `templates.py`.
+_EXPECTED_PRETOOLUSE_COMMAND = f'"{sys.executable}" -m shipgate.hooks.pretooluse'
+_EXPECTED_POSTTOOLUSE_COMMAND = f'"{sys.executable}" -m shipgate.hooks.posttooluse'
+_EXPECTED_STOP_COMMAND = f'"{sys.executable}" -m shipgate.hooks.stop'
 
 
 # --- fresh directory: everything written ------------------------------------------------
@@ -72,15 +75,28 @@ def test_generated_settings_json_never_emits_a_bare_python_command(tmp_path: Pat
         for group in data["hooks"][event]:
             for handler in group["hooks"]:
                 assert handler["command"] != f"python -m shipgate.hooks.{event.lower()}"
-                assert Path(handler["command"].rsplit(" -m ", 1)[0]).is_absolute()
+                interpreter = handler["command"].rsplit(" -m ", 1)[0].strip('"')
+                assert Path(interpreter).is_absolute()
 
 
 def test_generated_claude_md_carries_the_task_class_declaration_instruction(tmp_path: Path):
     run_init(tmp_path, intent_summary=_INTENT, test_command=_TEST_CMD)
     text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
-    assert "shipgate declare-task-class" in text
+    assert "declare-task-class" in text
     assert CLAUDE_MD_BEGIN_MARKER in text
     assert CLAUDE_MD_END_MARKER in text
+
+
+def test_generated_claude_md_gives_an_absolute_quoted_cli_path_not_a_bare_shipgate(tmp_path: Path):
+    """Root-cause fix, Session 048 (pilot project, 2026-09-21, P0): a bare `shipgate`
+    depends on PATH, which the fleet's own PATH proved unreliable (a dead pre-migration
+    `D:\\...` entry). The doctrine block must give an absolute, quoted interpreter path
+    instead, the same trust-chain fix already applied to the hook commands."""
+    run_init(tmp_path, intent_summary=_INTENT, test_command=_TEST_CMD)
+    text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert f'"{sys.executable}" -m shipgate.cli declare-task-class' in text
+    assert "\n    shipgate declare-task-class" not in text
+    assert "__SHIPGATE_CLI__" not in text  # the placeholder must never leak unsubstituted
 
 
 # --- shipfile.yaml: always refuse if one already exists, the founder's exact ask --------
@@ -355,3 +371,77 @@ def test_settings_json_does_not_touch_an_unrelated_hook_with_a_similar_looking_c
     assert unrelated_command in stop_handlers  # untouched
     assert _EXPECTED_STOP_COMMAND in stop_handlers  # ShipGate's own added alongside it
     assert len(stop_handlers) == 2
+
+
+# --- fleet-rollout finding 2026-09-11: the timeout fix had to reach EXISTING installs ---
+
+
+def test_rerunning_init_adds_a_missing_timeout_to_an_existing_hook_entry(tmp_path):
+    """**Self-caught while preparing the fleet rollout.** `build_hooks_fragment` started
+    emitting an explicit `timeout` (pilot report §1c), but the settings.json merge only
+    reconciled `command` — so every already-installed project would have kept inheriting
+    the host default forever, and a re-run would have said "nothing to change". The fix
+    would have reached only brand-new installs: nobody in the existing fleet."""
+    import json
+    import sys
+
+    from shipgate.discipline.init import run_init
+
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    # Exactly the shape a pre-fix `shipgate init` left behind: correct command, no timeout.
+    settings.write_text(
+        json.dumps({
+            "hooks": {
+                event: [{"matcher": "*", "hooks": [{
+                    "type": "command",
+                    "command": f"{sys.executable} -m shipgate.hooks.{module}",
+                }]}]
+                for event, module in (
+                    ("PreToolUse", "pretooluse"), ("PostToolUse", "posttooluse"), ("Stop", "stop")
+                )
+            }
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+    run_init(tmp_path, intent_summary="x", test_command="pytest -q")
+
+    merged = json.loads(settings.read_text(encoding="utf-8"))
+    for event in ("PreToolUse", "PostToolUse", "Stop"):
+        handler = merged["hooks"][event][0]["hooks"][0]
+        assert "timeout" in handler, f"{event} still has no timeout after re-running init"
+        assert isinstance(handler["timeout"], int)
+    assert merged["hooks"]["Stop"][0]["hooks"][0]["timeout"] == 300
+
+
+def test_init_never_overrides_a_timeout_the_user_set_deliberately(tmp_path):
+    """Additive merge, not replacement. A `timeout` a user chose is their declared config,
+    and silently narrowing a user's declared config is the exact behaviour this product
+    blocks agents for."""
+    import json
+    import sys
+
+    from shipgate.discipline.init import run_init
+
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({
+            "hooks": {
+                "Stop": [{"matcher": "*", "hooks": [{
+                    "type": "command",
+                    "command": f"{sys.executable} -m shipgate.hooks.stop",
+                    "timeout": 900,  # the user's own deliberate, larger budget
+                }]}]
+            }
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+    run_init(tmp_path, intent_summary="x", test_command="pytest -q")
+
+    merged = json.loads(settings.read_text(encoding="utf-8"))
+    assert merged["hooks"]["Stop"][0]["hooks"][0]["timeout"] == 900, (
+        "init overwrote a timeout the user set deliberately"
+    )

@@ -249,6 +249,7 @@ def _merge_settings_json(project_root: Path) -> FileOutcome:
     for event in _HOOK_EVENTS:
         wanted_entry = fragment["hooks"][event][0]
         wanted_command = wanted_entry["hooks"][0]["command"]
+        wanted_timeout = wanted_entry["hooks"][0]["timeout"]
         module = _HOOK_EVENT_MODULES[event]
         suffix = hook_command_suffix(module)
         groups = hooks_block.setdefault(event, [])
@@ -283,9 +284,29 @@ def _merge_settings_json(project_root: Path) -> FileOutcome:
         if own_handler is None:
             groups.append(wanted_entry)
             added.append(event)
-        elif own_handler.get("command") != wanted_command:
-            own_handler["command"] = wanted_command
-            updated.append(event)
+        else:
+            changed = False
+            if own_handler.get("command") != wanted_command:
+                own_handler["command"] = wanted_command
+                changed = True
+            # **Self-caught while preparing the fleet rollout, and it was a half-shipped
+            # fix.** `build_hooks_fragment` began emitting an explicit `timeout` (the
+            # pilot report §1c finding), but this merge only ever reconciled `command` —
+            # so every project that had ALREADY run `shipgate init` would keep silently
+            # inheriting the host's default forever, and re-running `init` would report
+            # "nothing to change" while the gap stayed open. The fix would have reached
+            # only brand-new installs, which is precisely nobody in the existing fleet.
+            #
+            # Set only when ABSENT, never overridden. A `timeout` a user put there
+            # deliberately is their declared config, and silently narrowing a user's
+            # declared config is the exact behaviour this product blocks agents for
+            # (see `shipgate/gate/orchestrator.py`'s design decision 3). Additive merge,
+            # the same policy this module applies to every other key.
+            if "timeout" not in own_handler:
+                own_handler["timeout"] = wanted_timeout
+                changed = True
+            if changed:
+                updated.append(event)
 
     if not added and not updated:
         return FileOutcome(

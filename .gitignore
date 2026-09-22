@@ -29,3 +29,14 @@ Thumbs.db
 .DS_Store
 .idea/
 .vscode/
+
+# Old ShipGate folders moved here from C:\Models Python on 2026-09-21 at the founder's
+# request (Session 049). Kept on disk as local history only: shipgate_public has its own
+# .git (the public-repo publishing folder), and the rest are pre-git snapshot copies of
+# the package, so none of them may be tracked by, linted as, or exported from this repo.
+Archive/ShipGate_BACKUP_2026-08-18_151924/
+Archive/shipgate_archive_test/
+Archive/shipgate_public/
+Archive/shipgate_public_demo/
+Archive/shipgate_public_gatec/
+Archive/shipgate_public_sync/

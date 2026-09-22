@@ -40,6 +40,8 @@ CLAUDE.md export-ignore
 PHASE_PLAN.md export-ignore
 SESSION_LOG.md export-ignore
 PARKING_LOT.md export-ignore
+BACKLOG.md export-ignore
+BACKTEST_CRITERIA.md export-ignore
 ANALYST_DISCIPLINE_CHARTER.md export-ignore
 Archive/ export-ignore
 docs/REPORT_REVIEW_2026-08-15.md export-ignore
@@ -48,4 +50,20 @@ docs/analyst_briefs/ export-ignore
 "README_STRUCTURE.md" export-ignore
 docs/launch_assets.md export-ignore
 docs/README_draft_proposed.md export-ignore
+docs/local_fleet_rollout.md export-ignore
 "v3 research on controlling ai for best output.txt" export-ignore
+"Devin_improvement suggestions_shipgate.md" export-ignore
+"Claude_improvement suggestions_shipgate.md" export-ignore
+
+# Pilot//fleet correspondence -- never public. Contains other projects private
+# operational detail (deadlines, strategy, their own defect registers) shared with this
+# analyst in confidence, not ShipGate documentation. Added 2026-09-11 the same session
+# these files were first committed, before any public sync.
+analyst_inbox/ export-ignore
+
+# Same reasoning, the outbound half. This analyst's own replies to other fleet/pilot
+# projects reference the same private operational detail (their file paths, their
+# ledger contents, their defect registers) and route through the identical inbox/outbox
+# correspondence convention -- not ShipGate documentation either. Added 2026-09-21
+# (Session 049), the same session this directory was first written, before any commit.
+analyst_outbox/ export-ignore

@@ -76,28 +76,56 @@ not trust a self-reported "done."
 `shipfile.yaml`, `task_classes` block — `high_risk_change` is the one `shipgate init`
 created for you; rename it or add more to match this project), declare it first:
 
-    shipgate declare-task-class <task_class> "<one-line description of the change>"
+    __SHIPGATE_CLI__ declare-task-class <task_class> "<one-line description of the change>"
 
 This records the change against this session's blast-radius budget
 (`session_policy.max_high_risk_changes_per_session`). The N+1th high-risk change in one
 session is refused pending a logged override:
 
-    shipgate declare-task-class <task_class> "<description>" --override-reason "<why>"
+    __SHIPGATE_CLI__ declare-task-class <task_class> "<description>" --override-reason "<why>"
 
 **This is a self-declaration, not a detector.** ShipGate has no way to see an undeclared
 high-risk change — its own reports always state the declared count as *self-declared
 only*, never as a verified clean pass, so zero declarations reads as "nothing was
 declared," never as "nothing risky happened."
 
+This splits into two separate roles, worth naming so you don't conflate them: declaring
+a task class and checking it against the session's budget is the **Policy Decision
+Point** (`declare-task-class` records the request; the budget check decides whether it's
+allowed or needs a logged override) — deciding is not the same as enforcing. The **Policy
+Enforcement Point** is the `Stop` hook / gate refusal that actually blocks the session
+from ending on a failing verdict. A decision with no enforcement is just an opinion; this
+project keeps both, and keeps them separate.
+
 Never edit `shipfile.yaml`'s `task_classes`, `done_conditions`, `gate_policy`, or
 `session_policy` blocks to make a failing gate pass. Fix the underlying work instead."""
 
 
-def wrapped_claude_md_block() -> str:
+#: Placeholder inside `CLAUDE_MD_BLOCK`, substituted by `wrapped_claude_md_block` with
+#: the absolute, quoted CLI invocation. Never a bare `shipgate` — see that function's
+#: docstring.
+_CLAUDE_MD_CLI_PLACEHOLDER = "__SHIPGATE_CLI__"
+
+
+def wrapped_claude_md_block(*, python_executable: str | None = None) -> str:
     """`CLAUDE_MD_BLOCK` between its markers — the exact text `init.py` writes fresh or
     replaces in place on re-run. A function, not a module constant, so the markers and
-    the block body can never drift out of sync with each other."""
-    return f"{CLAUDE_MD_BEGIN_MARKER}\n{CLAUDE_MD_BLOCK}\n{CLAUDE_MD_END_MARKER}"
+    the block body can never drift out of sync with each other.
+
+    **Root-cause finding, 2026-09-21 (pilot project), P0: the doctrine text told the agent
+    to run bare `shipgate`.** The user PATH is not guaranteed to have ShipGate's own
+    venv on it (the fleet's own PATH still held a dead pre-migration `D:\\...` entry) —
+    a bare `shipgate` then resolves to nothing, or to the wrong install. Every emitted
+    invocation now uses `"<abs interpreter>" -m shipgate.cli`, the same absolute,
+    quoted-interpreter form the hook commands use (`build_hooks_fragment`), and for the
+    same reason: an absolute path removes PATH from the trust chain entirely.
+    `python -m shipgate.cli` works because `shipgate.cli:app`'s module also has an
+    `if __name__ == "__main__": app()` guard — running it with `-m` is equivalent to the
+    installed `shipgate` console script, not a workaround."""
+    python_executable = python_executable if python_executable is not None else sys.executable
+    shipgate_cli = f'"{python_executable}" -m shipgate.cli'
+    block = CLAUDE_MD_BLOCK.replace(_CLAUDE_MD_CLI_PLACEHOLDER, shipgate_cli)
+    return f"{CLAUDE_MD_BEGIN_MARKER}\n{block}\n{CLAUDE_MD_END_MARKER}"
 
 
 def hook_command_suffix(module: str) -> str:
@@ -112,6 +140,37 @@ def hook_command_suffix(module: str) -> str:
     return f"-m shipgate.hooks.{module}"
 
 
+#: The `timeout` (seconds) emitted onto each generated hook entry.
+#:
+#: **Pilot finding, 2026-09-11 (pilot project).** The generated `settings.json` set no
+#: `timeout` on any of the three hooks, so each silently inherited Claude Code's own
+#: default (600s, cited in this module's docstring). Inheriting a default is not the
+#: same as choosing one: nothing connected the budget the gate actually runs under to
+#: the budget the gate was designed against, and the number could change underneath a
+#: deployed install without anything here noticing.
+#:
+#: The numbers are chosen against ShipGate's own bounds rather than picked round:
+#:
+#: - `Stop` — the only event that evaluates conditions. Its cost is bounded by
+#:   `shipgate.gate.checkers.DEFAULT_CHECKER_TIMEOUT_SECONDS` (60s) per dispatchable
+#:   condition, plus a fingerprint walk bounded by
+#:   `_FINGERPRINT_WALK_BUDGET_SECONDS` (5s). 300s therefore leaves genuine headroom
+#:   for a handful of conditions while still finishing **inside** the host's 600s
+#:   default — so a `Stop` that overruns is stopped by ShipGate's own bound, which
+#:   writes an honest `unverified`, rather than by the host's, which writes nothing.
+#:   That ordering is the entire point: a budget you own fails loudly, a budget you
+#:   inherit fails silently.
+#: - `PreToolUse` / `PostToolUse` — observational only: parse stdin, write one row.
+#:   These run on *every tool call*, so a long budget buys nothing and a hung hook
+#:   would stall the session. 30s is far above their real cost (milliseconds) and far
+#:   below anything a user would experience as a hang.
+HOOK_TIMEOUT_SECONDS = {
+    "pretooluse": 30,
+    "posttooluse": 30,
+    "stop": 300,
+}
+
+
 def build_hooks_fragment(*, python_executable: str | None = None) -> dict:
     """The `hooks` fragment `init.py` merges into `.claude/settings.json`. One matcher
     group per event, each with exactly one handler — ShipGate's own. Never includes
@@ -124,13 +183,35 @@ def build_hooks_fragment(*, python_executable: str | None = None) -> dict:
     `"python"` (Session 010 fix; see this module's own docstring, "Founder review
     finding"). The parameter exists so a caller (or a test) can supply a different
     interpreter path explicitly rather than this function silently reading global
-    process state whenever that's not what's wanted."""
+    process state whenever that's not what's wanted.
+
+    **Pilot finding, 2026-09-11 (pilot project): every generated hook entry omitted
+    `timeout`, so all three inherited a host default ShipGate had no relationship
+    with.** Now emitted explicitly — see `HOOK_TIMEOUT_SECONDS`.
+
+    **Root-cause finding, 2026-09-21 (pilot project), P0: the interpreter path was never
+    quoted.** Claude Code runs hook commands through Git Bash on Windows. Every real
+    interpreter path in this fleet is under `C:\\Models Python\\...` — a space — and an
+    unquoted `C:\\Models Python\\...\\python.exe -m ...` fails at the shell with `command
+    not found` (exit 127) before Python is ever reached. Hooks fail open by design, so
+    this was invisible: every hook in every fleet project has been silently failing
+    since install. Reproduced directly (`bash -c` with and without quotes) before this
+    fix; see `SESSION_LOG.md` Session 048. Fixed by quoting the interpreter path here —
+    `shipgate/doctor/wiring.py`'s `_interpreter_and_module` already tolerated a quoted
+    interpreter (it strips one layer of quotes when parsing), so this is a one-sided
+    fix: only the writer was wrong."""
     python_executable = python_executable if python_executable is not None else sys.executable
 
     def _entry(module: str) -> dict:
         return {
             "matcher": "*",
-            "hooks": [{"type": "command", "command": f"{python_executable} {hook_command_suffix(module)}"}],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f'"{python_executable}" {hook_command_suffix(module)}',
+                    "timeout": HOOK_TIMEOUT_SECONDS[module],
+                }
+            ],
         }
 
     return {

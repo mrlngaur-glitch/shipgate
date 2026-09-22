@@ -209,13 +209,118 @@ def ensure_session(writer: LedgerWriter, *, session_id: str, cwd: str) -> None:
         )
 
 
+#: Written immediately BEFORE gate evaluation begins, and paired with a terminal row
+#: (`gate_evaluation`, or `GATE_INCOMPLETE_RECORD_TYPE` below) once it ends.
+GATE_STARTED_RECORD_TYPE = "gate_started"
+
+#: Written when a `GATE_STARTED_RECORD_TYPE` row is found with no terminal row after it
+#: — i.e. a gate evaluation that began and never finished.
+GATE_INCOMPLETE_RECORD_TYPE = "gate_incomplete"
+
+#: Record types that close an open `gate_started`.
+_GATE_TERMINAL_RECORD_TYPES = ("gate_evaluation", GATE_INCOMPLETE_RECORD_TYPE)
+
+#: How far back `reconcile_abandoned_gates` looks. A bound, not a guess about
+#: importance: this runs inside a hook, so it must never become a full-table scan on a
+#: long-lived ledger. Anything older than this has already been reconciled by one of the
+#: many hook invocations since — the only way to accumulate more than this many
+#: unreconciled rows is for the gate to die 50 times in a row without a single
+#: successful evaluation in between, which is itself reported the first time it happens.
+_GATE_RECONCILE_LOOKBACK = 50
+
+
+def reconcile_abandoned_gates(writer: LedgerWriter, *, source_file: str, now: str) -> list[str]:
+    """Turns "the gate never finished" from silence into a ledger row. Returns the
+    `session_id` of every abandoned evaluation it recorded (empty list: nothing to do).
+
+    **Pilot finding, 2026-09-11 (pilot project): "a gate that fails open silently is worse
+    than no gate at all, because the project's doctrine now tells everyone they are
+    protected."** Before this, a `Stop` hook that was killed mid-evaluation — host
+    timeout, crash, machine sleep, `TerminateProcess` — wrote nothing at all. So
+    "the gate passed", "the gate never ran" and "the gate was killed" were *identical*
+    in the ledger, and the only one of the three that looked any different was the one
+    that never happens. That is exactly the unmeasured-and-zero-are-the-same-value
+    failure this product exists to stop agents committing.
+
+    **Why a sentinel row and not a signal handler.** A `SIGTERM`/`SIGINT` handler that
+    writes the row on the way down is the obvious design and it is the wrong one here:
+    it cannot work for `SIGKILL`, and on Windows — the platform this is actually
+    deployed on — a killed hook is normally `TerminateProcess`, which delivers no signal
+    at all and runs no handler. A handler would therefore be a mechanism that looks like
+    a guarantee and silently isn't, on the one platform that matters most. Writing the
+    sentinel BEFORE the work starts and reconciling it at the next hook survives every
+    kill mode on every platform, because it never needs the dying process to do anything.
+
+    **Why this is not a background daemon** (this project's own standing rule forbids
+    them): it does no polling and starts no process. It runs only when a hook is already
+    firing for its own reasons — deferred work at a natural touchpoint, which is the
+    shape that rule prescribes."""
+    started_rows = writer.connection.execute(
+        "SELECT event_id, session_id FROM events WHERE record_type = ? "
+        "ORDER BY event_id DESC LIMIT ?",
+        (GATE_STARTED_RECORD_TYPE, _GATE_RECONCILE_LOOKBACK),
+    ).fetchall()
+    if not started_rows:
+        return []
+
+    oldest_considered = min(row[0] for row in started_rows)
+    terminal_ids = [
+        row[0]
+        for row in writer.connection.execute(
+            "SELECT event_id FROM events WHERE event_id > ? AND record_type IN "
+            f"({','.join('?' * len(_GATE_TERMINAL_RECORD_TYPES))}) ORDER BY event_id",
+            (oldest_considered, *_GATE_TERMINAL_RECORD_TYPES),
+        ).fetchall()
+    ]
+
+    # A `gate_started` is abandoned when no terminal row falls between it and the NEXT
+    # `gate_started`. Bounding by the next start (rather than just "any later terminal
+    # row") is what makes repeated deaths each get their own row instead of one later
+    # success retroactively excusing all of them.
+    starts_ascending = sorted(started_rows)
+    abandoned: list[tuple[int, str]] = []
+    for index, (start_id, session_id) in enumerate(starts_ascending):
+        next_start_id = starts_ascending[index + 1][0] if index + 1 < len(starts_ascending) else None
+        closed = any(
+            terminal_id > start_id and (next_start_id is None or terminal_id < next_start_id)
+            for terminal_id in terminal_ids
+        )
+        if not closed:
+            abandoned.append((start_id, session_id))
+
+    for start_id, session_id in abandoned:
+        writer.insert_event(
+            session_id=session_id,
+            source_file=source_file,
+            source_offset=0,
+            transcript_tier=DEFAULT_TRANSCRIPT_TIER,
+            record_type=GATE_INCOMPLETE_RECORD_TYPE,
+            timestamp=now,
+            raw_payload={
+                "abandoned_gate_started_event_id": start_id,
+                "detected_at": now,
+                "reason": (
+                    "a gate evaluation began and never recorded an outcome. The hook "
+                    "process did not finish -- killed by the host's hook timeout, "
+                    "crashed, or the machine stopped. This is NOT a pass: no condition "
+                    "was confirmed, and the session it belonged to was allowed to end "
+                    "ungated."
+                ),
+            },
+        )
+    return [session_id for _, session_id in abandoned]
+
+
 __all__ = [
     "DEFAULT_TRANSCRIPT_TIER",
+    "GATE_INCOMPLETE_RECORD_TYPE",
+    "GATE_STARTED_RECORD_TYPE",
     "HookInputError",
     "ProjectRootUnresolvableError",
     "ensure_session",
     "ensure_utf8_streams",
     "open_project_ledger",
     "read_hook_input",
+    "reconcile_abandoned_gates",
     "utc_now_iso",
 ]

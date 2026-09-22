@@ -466,3 +466,84 @@ def test_handle_ledger_unavailable_escalation_shape_directly(tmp_path, capsys):
     marker = stop._read_gate_unavailable_marker(cwd)
     assert marker["consecutive_failures"] == 7
     assert marker["exhausted"] is True
+
+
+# --- pilot finding 2026-09-11: a killed gate must not look like a passed gate ----------
+
+
+def _events(tmp_path):
+    conn = sqlite3.connect(_ledger_path(tmp_path))
+    try:
+        return conn.execute(
+            "SELECT event_id, session_id, record_type FROM events ORDER BY event_id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_a_gate_that_never_completes_is_recorded_not_silent(tmp_path, capsys):
+    """**The finding this fixes, reproduced without needing to kill a process.** A hook
+    that dies mid-evaluation leaves a `gate_started` row and no terminal row. Simulated
+    here by writing exactly that state (which is all a killed process leaves behind),
+    then firing a normal Stop hook and asserting it notices.
+
+    Pre-fix there was no `gate_started` row at all, so a killed gate left the ledger
+    byte-identical to one where the gate had never been asked to run -- and "passed",
+    "never ran" and "was killed" were indistinguishable."""
+    _write_shipfile(tmp_path, [{"id": "ok", "type": "command_succeeds", "command": f'"{PY}" -c "pass"'}])
+
+    # A first Stop that dies part-way: run it normally, then hand-write the abandoned
+    # sentinel the way a killed process would have left it.
+    stop.run(_stop_payload(tmp_path, session_id="died"))
+    from shipgate.hooks._common import GATE_STARTED_RECORD_TYPE, open_project_ledger
+
+    with open_project_ledger(str(tmp_path)) as writer:
+        writer.insert_event(
+            session_id="died", source_file="<live-hook:Stop>", source_offset=0,
+            transcript_tier="session", record_type=GATE_STARTED_RECORD_TYPE,
+            timestamp="2026-09-11T00:00:00Z", raw_payload={"condition_count": 1},
+        )
+
+    capsys.readouterr()  # discard the first session's output
+    assert stop.run(_stop_payload(tmp_path, session_id="next")) == 0
+    captured = capsys.readouterr()
+
+    assert captured.out == "", "reconciliation must never write to stdout (the decision channel)"
+    assert "began and never completed" in captured.err
+    assert "died" in captured.err, "the stderr line must name the session that ended ungated"
+
+    types_by_session = [(sess, rt) for _, sess, rt in _events(tmp_path)]
+    assert ("died", "gate_incomplete") in types_by_session, (
+        "the abandoned gate must be recorded against the session that abandoned it, "
+        "not the session that noticed"
+    )
+
+
+def test_a_completed_gate_is_never_reported_as_incomplete(tmp_path, capsys):
+    """The other half, and the one that matters for trust: normal back-to-back sessions
+    must not manufacture `gate_incomplete` rows. A fail-loud mechanism that cries wolf
+    is worse than none, because it trains everyone to ignore it."""
+    _write_shipfile(tmp_path, [{"id": "ok", "type": "command_succeeds", "command": f'"{PY}" -c "pass"'}])
+    for session in ("s1", "s2", "s3"):
+        assert stop.run(_stop_payload(tmp_path, session_id=session)) == 0
+
+    record_types = [rt for _, _, rt in _events(tmp_path)]
+    assert "gate_incomplete" not in record_types, f"false positive: {record_types}"
+    assert record_types.count("gate_started") == 3
+    assert record_types.count("gate_evaluation") == 3
+
+
+def test_a_green_gate_says_so_instead_of_exiting_silently(tmp_path, capsys):
+    """**Pilot finding: the hook was completely silent on success.** Exit 0, no output --
+    identical, from outside, to being killed at the host's budget. A pass now announces
+    itself on stderr, so that silence carries exactly one meaning: the gate did not run.
+
+    stdout must stay empty: it is the channel Claude Code parses as a decision."""
+    _write_shipfile(tmp_path, [{"id": "ok", "type": "command_succeeds", "command": f'"{PY}" -c "pass"'}])
+    assert stop.run(_stop_payload(tmp_path)) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "gate green" in captured.err
+    assert "1 condition(s) evaluated" in captured.err
+    assert "ok: verified" in captured.err

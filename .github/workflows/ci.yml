@@ -252,8 +252,104 @@ jobs:
           #      systematic integrity pass: every rendered Ship Report input enumerated
           #      with its source and whether --verify's hash-chain re-derivation covers it;
           #      one data-layer test, one CLI-output wording test.
-          # = 468 — the current count
-          MIN_TESTS: 468
+          # = 468 — a subtotal. Superseded below — this is no longer the current count.
+          # + 8  tests/unit/test_hook_wiring.py — Session 043, fleet-rollout D-3 defect
+          #      (a pilot project's own analyst, reviewing independently, found `shipgate
+          #      status --project-dir .` printing GATE: GREEN on a project whose every
+          #      hook interpreter path was dead — status/report only read what's already
+          #      in the ledger and never look at .claude/settings.json, so a hook gone
+          #      silently dark is invisible to them by construction). New
+          #      shipgate.doctor.wiring.check_hook_wiring, wired into `shipgate doctor`
+          #      as a second, always-run section: no-settings.json and no-shipgate-hooks
+          #      are both vacuous (not a pass), a dead interpreter path is a hard failure,
+          #      a module that fails to import under a real interpreter is a hard
+          #      failure, a genuinely-working real-interpreter/real-module pair is OK,
+          #      and ledger staleness (missing entirely, or last-written >3 days ago) is
+          #      a warning only, never a hard fail — a dormant-but-fine project must not
+          #      be told it's broken. Reproduced the exact live defect first (real
+          #      `doctor` run against a pilot project's actual dead hooks, all three
+          #      interpreters confirmed nonexistent-on-disk independently before any fix
+          #      landed), then verified the fix by re-running `doctor` against two other pilot
+          #      projects after repairing their hooks to the correct C:\ path (they had the
+          #      same defect: repaired to a stale E:\ / D:\ path in an earlier session,
+          #      never the live C:\ tree) and seeing zero failures.
+          # = 476 — a subtotal. Superseded below — this is no longer the current count.
+          # + 2  tests/integration/test_cli_e2e.py and tests/unit/test_hook_wiring.py —
+          #      Session 044, a pilot project's own analyst, F-1/F-2: 1 end-to-end regression
+          #      test proving a real wiring failure now forces `doctor`'s exit code to 1
+          #      even when the shipfile is vacuous (previously 3 always won under plain
+          #      max(), so a genuinely dead hook could never move the exit code at all --
+          #      reproduced live: one pilot project with 3 dead hooks and two others both healthy
+          #      all reported the identical exit 3), 1 unit test proving the dead-
+          #      interpreter remedy text now names a non-interactive path instead of the
+          #      bare `shipgate init --project-dir .` that prompts and aborts on null
+          #      stdin.
+          # = 478 — a subtotal. Superseded below — this is no longer the current count.
+          # + 1  tests/integration/test_cli_e2e.py — Session 045, supervisor-via-
+          #      pilot-project review: a project with a genuinely clean shipfile but no
+          #      `.claude/settings.json` at all (shipgate init never run) now renders
+          #      exit 3, not a silent 0 -- deliberate design decision, exit codes are a
+          #      strict priority ladder (broken > vacuous > clean) over each half's own
+          #      named tier, replacing the previous ad-hoc per-branch max()/override
+          #      calls (the same shape that caused the F-2 defect once already).
+          # = 479 — a subtotal. Superseded below — this is no longer the current count.
+          # + 1  tests/unit/test_hook_wiring.py — Session 046, pilot-supervisor,
+          #      evidence-framing finding: the hook-wiring freshness check used to read
+          #      .shipgate/ledger.db's own file mtime, which reflects the most recent
+          #      write from *any* source -- demonstrated live against a pilot project's own
+          #      ledger that a CLI-only write made the file look under a day old while
+          #      no hook had actually fired since 2026-08-19. Fixed: freshness is now
+          #      derived from the most recent events row whose record_type only a real
+          #      hook writes (pretooluse_hook/posttooluse_hook/stop_hook), with its own
+          #      distinct message when the ledger has real activity but none of it is
+          #      genuinely hook-sourced. Net +1 test (two existing tests rewritten
+          #      against real ledger fixtures instead of an empty placeholder file; one
+          #      new test for the CLI-only-activity case).
+          #   + 9 in Session 047 (pilot finding, pilot project 2026-09-11): 5 pinning the
+          #      project-fingerprint fix (contents are never read; oversize files are
+          #      excluded AND counted; the digest is stable on an unchanged tree but
+          #      moves on a real edit; a freshly-written tree refuses to be compared at
+          #      all, which preserves design decision 4's never-over-detect invariant
+          #      that metadata hashing would otherwise have broken; the shared file walk
+          #      prunes ignored directories without descending) and 3 pinning the fail-loud gate (an abandoned
+          #      gate evaluation is recorded as gate_incomplete against the session that
+          #      abandoned it; consecutive healthy sessions never manufacture one; a
+          #      green gate announces itself instead of exiting silently). Root cause
+          #      fixed: compute_project_fingerprint read every byte of every walked file
+          #      — 47.2 GB across 17,692 files, 297.03s measured on the pilot's tree, on
+          #      every single Stop — which was the real reason the gate could not finish,
+          #      NOT the done_conditions command the report attributed it to.
+          #   + 2 in Session 047 rollout prep: re-running `init` now adds a missing
+          #      `timeout` to an ALREADY-INSTALLED hook entry (the §1c fix previously
+          #      reached only brand-new installs, i.e. nobody in the existing fleet), and
+          #      never overrides a `timeout` the user set deliberately.
+          # = 491 — a subtotal. Superseded below — this is no longer the current count.
+          # + 4  tests/unit/test_hook_wiring.py + tests/unit/test_discipline_init.py —
+          #      Session 048 (pilot project, 2026-09-21), P0 root cause: hook commands
+          #      were never quoted, and every real interpreter path in the fleet is
+          #      under `C:\Models Python\...` -- a space -- so every hook in all 13
+          #      fleet projects has been failing silently at the shell (Claude Code
+          #      runs hook commands through Git Bash on Windows) since install; the
+          #      existing argv-parse doctor check could not see this because it never
+          #      executes anything through a shell. Fixed: interpreter paths are now
+          #      quoted (hook commands and the CLAUDE.md CLI-invocation doctrine block,
+          #      both `shipgate/discipline/templates.py`), and `shipgate doctor` gained
+          #      a second, independent check that runs the exact configured command
+          #      string through the real resolved Git Bash (`shutil.which`, not a bare
+          #      `"bash"` -- found live, mid-build, that an unqualified `"bash"` under
+          #      `subprocess.run` resolves to `System32\bash.exe`, the WSL launcher, via
+          #      Windows's CreateProcess search order, which checks System32 before
+          #      PATH -- a second real defect this session's own regression tests
+          #      would otherwise have silently passed against the wrong bash). 2 tests
+          #      pin the quoting fix (unquoted-with-a-space fails, quoted passes,
+          #      against the real interpreter path this repo already has); 1 pins the
+          #      end-to-end doctor-red-then-green repair via a plain `shipgate init`
+          #      re-run (no new `--repair-hooks` flag needed -- the existing
+          #      suffix-matched settings.json merge already overwrites a stale command
+          #      in place); 1 pins the CLAUDE.md doctrine block no longer emitting a
+          #      bare `shipgate`.
+          # = 495 — the current count
+          MIN_TESTS: 495
 
       - name: Tests
         run: python -m pytest

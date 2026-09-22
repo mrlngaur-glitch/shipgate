@@ -158,6 +158,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -282,24 +283,191 @@ def _ensure_claim(writer: LedgerWriter, *, claim_id: str, session_id: str, condi
 _FINGERPRINT_HEX_LENGTH = 16
 
 
-def compute_project_fingerprint(project_root: Path) -> str:
+#: Files at or above this size are **excluded from the fingerprint entirely** — not
+#: read, and not even contributing their `(size, mtime)`.
+#:
+#: **Pilot finding, 2026-09-11 (pilot project), root-caused here rather than where it was
+#: filed.** The pilot reported the `Stop` gate as never completing and blamed the
+#: shipfile's `done_conditions` command. Measured, that was wrong — the command finished
+#: inside `DEFAULT_CHECKER_TIMEOUT_SECONDS`; the pilot's own ledger records it as
+#: `command exited 0`. The four minutes were spent *here*: the previous version of this
+#: function read every byte of every file `iter_scanned_files` walks, which on that
+#: project was **47.2 GB across 17,692 files, measured at 297.03s** — including two
+#: multi-gigabyte database snapshots and two 4.7 GB model weight files. Nothing bounded
+#: it, and it ran before any condition was evaluated, on every single `Stop`.
+#:
+#: Two separate defects, fixed together because they share a cause (treating "every file
+#: under the root" as "the code"):
+#:
+#: 1. **Cost.** Content hashing is replaced by `(relpath, size, mtime_ns)` — see this
+#:    function's docstring for what that trades away and why it is acceptable *for this
+#:    specific signal*.
+#: 2. **Signal quality.** A multi-gigabyte artifact that is rewritten every session
+#:    (a DB snapshot, a rotated log, a model checkpoint) changes the digest every time,
+#:    so `fingerprint_unchanged` would be permanently `False` and flake detection could
+#:    never fire at all. Excluding oversize files makes the signal track *source*, which
+#:    is the only thing it was ever meant to answer a question about.
+#:
+#: 8 MiB: comfortably above any plausible hand-written source file, comfortably below
+#: the artifact sizes above. A source file bigger than this is vanishingly rare, and
+#: missing one degrades flake detection (advisory-only, never a hard-block) rather than
+#: affecting any verdict.
+_FINGERPRINT_MAX_FILE_BYTES = 8 * 1024 * 1024
+
+#: Wall-clock ceiling for the fingerprint walk itself. The stat-only walk above is
+#: ~1,000x cheaper than the byte-reading one it replaces, but "cheaper" is not "bounded"
+#: — a network mount, a stalled filesystem, or a pathological tree can still hang a walk
+#: indefinitely, and this runs inside a hook the host is timing. On exhaustion the walk
+#: stops and reports itself **incomplete** rather than returning a digest that silently
+#: describes only part of the tree: see `ProjectFingerprint.complete`.
+_FINGERPRINT_WALK_BUDGET_SECONDS = 5.0
+
+#: How recently a file may have been modified before this fingerprint refuses to be
+#: used as a "nothing changed" signal.
+#:
+#: **This constant exists because the metadata fingerprint broke a documented invariant
+#: and the breakage was caught by it happening, not by reasoning about it.** Design
+#: decision 4 (module docstring) states the fingerprint "can under-detect flakiness ...
+#: but can never over-detect one (mislabel a genuine regression as 'flaky' when the code
+#: actually changed)." Content hashing gave that for free. Metadata hashing does not: two
+#: writes of the same byte length landing inside one filesystem timestamp tick produce an
+#: identical `(size, mtime_ns)` pair, so a real edit becomes invisible and a genuine
+#: regression could be suppressed as `QUARANTINED_FLAKY` — exactly the direction that
+#: invariant forbids.
+#:
+#: This was not hypothetical. The test written for this fix passed in isolation and
+#: FAILED in the full suite run, where load pushed two same-length writes into the same
+#: tick. That is the defect reproducing itself, in this repository, within minutes of
+#: being introduced.
+#:
+#: Restoring the invariant by content-hashing again is not available: the files *under*
+#: the size cap on the pilot's tree still total 1.41 GB, measured — so "only hash the
+#: small ones" is still a gigabyte of reads per `Stop`. Instead the fingerprint declines
+#: to answer: if anything it hashed was modified within this window, the tree has not
+#: settled, `mtime_settled` is False, and the digest is not comparable to any other.
+#: Flake detection switches off for that attempt and the checker's real verdict stands
+#: unmodified — under-detection, which the invariant permits.
+#:
+#: 2 seconds covers the worst timestamp granularity in practical use (FAT/exFAT's 2s)
+#: and every finer one (NTFS 100ns, ext4 1ns), so the window is bounded by the filesystem
+#: rather than by a guess about how fast an agent edits files.
+_FINGERPRINT_MTIME_TRUST_WINDOW_NS = 2_000_000_000
+
+
+@dataclass(frozen=True)
+class ProjectFingerprint:
+    """The digest plus what was actually observed to produce it. The counts are not
+    decoration: they are written into the `gate_evaluation` event so that a digest can
+    always be audited for what it covered, rather than being an opaque 16 hex characters
+    whose meaning silently changed when this function did.
+
+    Two independent reasons a digest may not be usable as a "nothing changed" signal,
+    kept as separate fields because they have separate causes and separate fixes:
+
+    - `complete` is `False` when the walk hit `_FINGERPRINT_WALK_BUDGET_SECONDS` before
+      finishing, so the digest describes only part of the tree.
+    - `mtime_settled` is `False` when something it hashed was modified within
+      `_FINGERPRINT_MTIME_TRUST_WINDOW_NS`, so metadata cannot be trusted to have
+      recorded a change that may have happened.
+
+    `comparable` is the only thing callers should test. Both failure modes resolve the
+    same way — refuse to compare — because the only thing a fingerprint match is allowed
+    to do is *suppress* a real verdict by calling it flaky."""
+
+    digest: str
+    files_hashed: int
+    files_skipped_oversize: int
+    complete: bool
+    mtime_settled: bool
+    duration_seconds: float
+
+    @property
+    def comparable(self) -> bool:
+        """Whether this digest may be compared against another to conclude "unchanged."""
+        return self.complete and self.mtime_settled
+
+
+def compute_project_fingerprint_detail(project_root: Path) -> ProjectFingerprint:
     """A deterministic `sha256` over every file `iter_scanned_files` would walk under
-    `project_root`, hashed as sorted `(relpath, content)` pairs and truncated to
-    `_FINGERPRINT_HEX_LENGTH` hex characters (see that constant's docstring for why) —
-    see the module docstring's design decision 4 for why this is project-wide rather
-    than per-condition. Reused as flake detection's "did the code change between two
-    looks" signal; two calls against an unchanged tree always produce the same digest."""
+    `project_root` and that is under `_FINGERPRINT_MAX_FILE_BYTES`, hashed as sorted
+    `(relpath, size, mtime_ns)` triples and truncated to `_FINGERPRINT_HEX_LENGTH` hex
+    characters (see that constant's docstring for why). Reused as flake detection's
+    "did the code change between two looks" signal; two calls against an unchanged tree
+    always produce the same digest.
+
+    **What changed, and what it costs — stated plainly rather than left for someone to
+    discover.** This used to hash file *contents*. It now hashes file *metadata*. That
+    is strictly a weaker signal: an edit that leaves both size and modification time
+    byte-identical is invisible to it. In practice that requires either a deliberate
+    timestamp restore or a filesystem with worse than nanosecond mtime resolution for
+    two writes inside the same tick.
+
+    This is acceptable **for this signal specifically, and would not be for a verdict.**
+    The only thing a fingerprint match does is let `_classify_with_flake_detection`
+    downgrade a flipped verdict to `QUARANTINED_FLAKY`, which is advisory-only and can
+    never hard-block (this project's own standing rule). So a missed change degrades to
+    "no flake detected" — the check's real result stands, unmodified. It can never turn
+    a red into a green. A fingerprint is not evidence and is never recorded as evidence;
+    `EvidenceTier` is what carries that, and nothing here touches it."""
+    started = time.monotonic()
     digest = hashlib.sha256()
-    files = sorted(iter_scanned_files(project_root, ["."]), key=lambda p: p.relative_to(project_root).as_posix())
+    files_hashed = 0
+    files_skipped_oversize = 0
+    complete = True
+    # 0 means "nothing hashed yet". An empty tree therefore reports settled, which is
+    # correct: there is nothing whose change could have been missed.
+    newest_mtime_ns = 0
+
+    # The deadline must cover the WALK, not just the hashing loop. Self-caught while
+    # measuring this fix: with the check only inside the loop below, the pilot's tree
+    # spent its entire budget enumerating files and then reported
+    # `files_hashed=0, complete=False` -- a technically-honest answer that was useless,
+    # because the expensive part had already happened before the first check ran.
+    collected: list[Path] = []
+    for candidate in iter_scanned_files(project_root, ["."]):
+        if time.monotonic() - started > _FINGERPRINT_WALK_BUDGET_SECONDS:
+            complete = False
+            break
+        collected.append(candidate)
+
+    files = sorted(collected, key=lambda p: p.relative_to(project_root).as_posix())
     for file_path in files:
+        if time.monotonic() - started > _FINGERPRINT_WALK_BUDGET_SECONDS:
+            complete = False
+            break
+        try:
+            stat = file_path.stat()
+        except OSError:
+            continue  # vanished mid-scan -- skipped, not a crash (as before)
+        if stat.st_size >= _FINGERPRINT_MAX_FILE_BYTES:
+            files_skipped_oversize += 1
+            continue
         digest.update(file_path.relative_to(project_root).as_posix().encode("utf-8"))
         digest.update(b"\0")
-        try:
-            digest.update(file_path.read_bytes())
-        except OSError:
-            pass  # vanished mid-scan -- treated as empty content, not a crash
+        digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
         digest.update(b"\0")
-    return digest.hexdigest()[:_FINGERPRINT_HEX_LENGTH]
+        files_hashed += 1
+        newest_mtime_ns = max(newest_mtime_ns, stat.st_mtime_ns)
+
+    # A negative difference (mtime in the future -- clock skew, a network mount) is
+    # caught by the same comparison: it is not >= the window, so the tree is treated as
+    # unsettled. Refusing to compare is the safe answer for an unexplained clock too.
+    mtime_settled = (time.time_ns() - newest_mtime_ns) >= _FINGERPRINT_MTIME_TRUST_WINDOW_NS
+
+    return ProjectFingerprint(
+        digest=digest.hexdigest()[:_FINGERPRINT_HEX_LENGTH],
+        files_hashed=files_hashed,
+        files_skipped_oversize=files_skipped_oversize,
+        complete=complete,
+        mtime_settled=mtime_settled,
+        duration_seconds=time.monotonic() - started,
+    )
+
+
+def compute_project_fingerprint(project_root: Path) -> str:
+    """The digest alone, for callers that don't need the provenance counts. Kept so the
+    name every existing caller and test already uses keeps working unchanged."""
+    return compute_project_fingerprint_detail(project_root).digest
 
 
 def _prior_fingerprint(writer: LedgerWriter, session_id: str) -> str | None:
@@ -431,9 +599,16 @@ def evaluate_gate(
         else None
     )
 
-    this_fingerprint = compute_project_fingerprint(project_root)
+    fingerprint = compute_project_fingerprint_detail(project_root)
+    this_fingerprint = fingerprint.digest
     prior_fp = _prior_fingerprint(writer, session_id)
-    fingerprint_unchanged = prior_fp is not None and prior_fp == this_fingerprint
+    # An INCOMPLETE walk is never comparable. A truncated walk can produce a digest that
+    # happens to equal a prior one (both stopped early at the same point) while the tree
+    # underneath actually changed -- and a fingerprint match's only power is to suppress
+    # a real verdict by relabelling it `QUARANTINED_FLAKY`. Requiring completeness keeps
+    # the failure direction conservative: an unbounded tree loses flake detection, never
+    # gains a wrongly-suppressed red.
+    fingerprint_unchanged = fingerprint.comparable and prior_fp is not None and prior_fp == this_fingerprint
 
     outcomes: list[ConditionOutcome] = []
     event_conditions: list[dict[str, Any]] = []
@@ -582,6 +757,16 @@ def evaluate_gate(
             "effective_max_retries": effective_max_retries,
             "ceiling_binding": ceiling_binding,
             "project_fingerprint": this_fingerprint,
+            # What the digest above actually covered. Recorded because a bare 16-char
+            # digest is unauditable: without these, a reader cannot tell a fingerprint
+            # that walked the whole tree from one that stopped at the budget, nor know
+            # that oversize artifacts were deliberately excluded rather than missed.
+            "project_fingerprint_files_hashed": fingerprint.files_hashed,
+            "project_fingerprint_files_skipped_oversize": fingerprint.files_skipped_oversize,
+            "project_fingerprint_complete": fingerprint.complete,
+            "project_fingerprint_mtime_settled": fingerprint.mtime_settled,
+            "project_fingerprint_comparable": fingerprint.comparable,
+            "project_fingerprint_duration_seconds": round(fingerprint.duration_seconds, 3),
             "all_dispatchable_green": all_green,
             "should_block": should_block,
             "exhausted": exhausted,
@@ -608,6 +793,8 @@ __all__ = [
     "SIDECAR_CLAIMS_DIRNAME",
     "ConditionOutcome",
     "GateEvaluation",
+    "ProjectFingerprint",
     "compute_project_fingerprint",
+    "compute_project_fingerprint_detail",
     "evaluate_gate",
 ]

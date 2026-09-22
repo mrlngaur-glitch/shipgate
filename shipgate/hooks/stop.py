@@ -145,12 +145,15 @@ from shipgate.shipfile import ShipfileSyntaxError, ShipfileValidationError, load
 
 from ._common import (
     DEFAULT_TRANSCRIPT_TIER,
+    GATE_INCOMPLETE_RECORD_TYPE,
+    GATE_STARTED_RECORD_TYPE,
     HookInputError,
     ProjectRootUnresolvableError,
     ensure_session,
     ensure_utf8_streams,
     open_project_ledger,
     read_hook_input,
+    reconcile_abandoned_gates,
     utc_now_iso,
 )
 
@@ -297,6 +300,20 @@ def run(stdin_text: str | None = None) -> int:
                     raw_payload=payload,
                 )
 
+                # Before anything else that could itself die: close out any gate
+                # evaluation that began and never finished. Deliberately placed ahead of
+                # this invocation's own `gate_started` row so it can never reconcile
+                # itself. See `reconcile_abandoned_gates`.
+                for abandoned_session in reconcile_abandoned_gates(
+                    writer, source_file=_SOURCE_FILE, now=now
+                ):
+                    sys.stderr.write(
+                        f"shipgate Stop hook: a previous gate evaluation (session "
+                        f"{abandoned_session!r}) began and never completed — recorded as "
+                        f"{GATE_INCOMPLETE_RECORD_TYPE!r}. That session ended WITHOUT being "
+                        "gated; nothing was verified. Run `shipgate doctor` for detail.\n"
+                    )
+
                 shipfile_path = Path(cwd) / DEFAULT_SHIPFILE_FILENAME
                 if not shipfile_path.exists():
                     return 0
@@ -316,6 +333,22 @@ def run(stdin_text: str | None = None) -> int:
                     )
                     return 0
 
+                # The sentinel. Written before evaluation starts so that a hook killed
+                # part-way through leaves proof it was killed, rather than leaving a
+                # ledger indistinguishable from one where the gate passed cleanly.
+                writer.insert_event(
+                    session_id=session_id,
+                    source_file=_SOURCE_FILE,
+                    source_offset=0,
+                    transcript_tier=DEFAULT_TRANSCRIPT_TIER,
+                    record_type=GATE_STARTED_RECORD_TYPE,
+                    timestamp=now,
+                    raw_payload={
+                        "condition_count": len(shipfile["done_conditions"]),
+                        "started_at": now,
+                    },
+                )
+
                 evaluation = evaluate_gate(shipfile, Path(cwd), session_id, writer, now=now)
                 if evaluation.ceiling_binding:
                     sys.stderr.write(
@@ -329,6 +362,28 @@ def run(stdin_text: str | None = None) -> int:
                     sys.stdout.write(json.dumps({"decision": "block", "reason": evaluation.block_reason}))
                 elif evaluation.exhausted:
                     sys.stderr.write(f"shipgate Stop hook: {evaluation.release_reason}\n")
+                else:
+                    # **Pilot finding, 2026-09-11 (pilot project): the hook was completely
+                    # silent on success — exit 0, not a byte of output.** So a gate that
+                    # evaluated everything and a gate that was killed at the host's
+                    # budget produced the identical observable result: nothing. That is
+                    # precisely why nobody noticed for 23 days. A pass now says it
+                    # passed, and says what it looked at, so that silence means one
+                    # thing only: the gate did not run.
+                    #
+                    # stderr, never stdout: stdout is the channel Claude Code parses as
+                    # a decision, and it must stay empty in every non-blocking case.
+                    dispatched = [outcome for outcome in evaluation.conditions if outcome.dispatchable]
+                    skipped = len(evaluation.conditions) - len(dispatched)
+                    summary = ", ".join(
+                        f"{outcome.condition_id}: {outcome.check_result.verdict.value}" for outcome in dispatched
+                    )
+                    sys.stderr.write(
+                        f"shipgate Stop hook: gate green — {len(dispatched)} condition(s) evaluated"
+                        + (f", {skipped} not dispatchable (no checker; NOT counted as passing)" if skipped else "")
+                        + (f" [{summary}]" if summary else "")
+                        + "\n"
+                    )
         except ProjectRootUnresolvableError as exc:
             # See _common.ProjectRootUnresolvableError's docstring. Deliberately NOT
             # routed through _handle_ledger_unavailable/P12's marker escalation: that

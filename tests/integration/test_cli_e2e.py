@@ -152,6 +152,70 @@ def test_doctor_live_after_init_is_vacuous_not_clean(tmp_path: Path):
     assert "NOT a clean result" in doctor_result.stdout
 
 
+def test_doctor_wiring_failure_forces_exit_1_even_when_shipfile_is_vacuous(tmp_path: Path):
+    """F-2 (Session 044, a pilot project's own analyst): a freshly-init'd project's shipfile
+    is *always* vacuous to doctor (its only condition, tests_pass, isn't a checked type --
+    see the test above) -- so before this fix, `report.is_vacuous` (exit 3) always beat a
+    real wiring failure (exit 1) under plain max(), and a genuinely dead hook could never
+    move the exit code away from 3. Reproduced live: one pilot project (3 dead hooks) and two
+    others (both healthy) all reported the identical exit 3. A wiring failure must dominate
+    shipfile vacuity, not the other way around."""
+    init_result = _init(tmp_path)
+    assert init_result.returncode == 0, init_result.stdout + init_result.stderr
+
+    # Break the hook interpreter path the same way the drive/rename migration did live.
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    for event in ("PreToolUse", "PostToolUse", "Stop"):
+        for matcher_block in settings["hooks"][event]:
+            for entry in matcher_block["hooks"]:
+                entry["command"] = r"C:\does\not\exist\python.exe -m shipgate.hooks.pretooluse"
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+    doctor_result = _run_cli(["doctor", "--project-dir", "."], tmp_path)
+
+    assert doctor_result.returncode == 1, doctor_result.stdout + doctor_result.stderr
+    assert "Nothing checked" in doctor_result.stdout  # shipfile section is still vacuous
+    assert "FAILURE" in doctor_result.stdout  # and the wiring section still reports it
+
+
+def test_doctor_wiring_never_installed_forces_exit_3_not_silent_0(tmp_path: Path):
+    """Design decision, Session 045 (pilot-supervisor review): a project whose
+    shipfile is genuinely clean but that has never had `shipgate init` run at all (no
+    `.claude/settings.json`, no ShipGate hook entries) must not report the same exit code
+    as a project that is actually confirmed healthy -- that would be exactly the
+    vacuous-pass shape this project's own doctrine forbids everywhere else, just moved
+    from the shipfile half of `doctor` to the wiring half. Uses a hand-written shipfile
+    with a real, resolvable `file_exists` condition (not `_init`'s default tests_pass,
+    which is always vacuous to doctor on its own and would mask this from the shipfile
+    side) so the wiring half is isolated as the only vacuous signal."""
+    (tmp_path / "real.txt").write_text("hi", encoding="utf-8")
+    shipfile_yaml = """
+shipfile_version: '0.1'
+task_classes:
+  feature: {risk_tier: medium, starting_model_tier: mid, max_tokens: 100000, gate_strictness: strict}
+done_conditions:
+- id: c1
+  type: file_exists
+  path: real.txt
+routing: {}
+budgets: {}
+context_policy: {}
+intent: {summary: isolated wiring-vacuous test}
+gate_policy: {max_retries: 0}
+session_policy: {max_high_risk_changes_per_session: 3}
+"""
+    (tmp_path / "shipfile.yaml").write_text(shipfile_yaml, encoding="utf-8")
+    # Deliberately no .claude/settings.json at all -- `shipgate init` was never run here.
+
+    doctor_result = _run_cli(["doctor", "--project-dir", "."], tmp_path)
+
+    assert doctor_result.returncode == 3, doctor_result.stdout + doctor_result.stderr
+    assert "Clean — 1 reference(s) checked, none stale." in doctor_result.stdout
+    assert "Nothing to check" in doctor_result.stdout
+    assert "shipgate init` has not been run here yet" in doctor_result.stdout
+
+
 def test_doctor_live_reports_genuine_clean_when_something_was_actually_checked(tmp_path: Path):
     init_result = _init(tmp_path)
     assert init_result.returncode == 0, init_result.stdout + init_result.stderr

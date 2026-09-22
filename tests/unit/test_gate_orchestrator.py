@@ -538,3 +538,162 @@ def test_finding5_fix2_the_ledger_records_a_real_verdict_row_not_silence(tmp_pat
     assert row is not None
     assert row[0] == "unverified-vacuous"
     assert "KeyError" in row[1]
+
+
+# --- pilot finding 2026-09-11: the fingerprint was the Stop hook's real cost -----------
+#
+# A pilot project reported the Stop gate as never completing and attributed it to the
+# shipfile's `done_conditions` command. Measured, that attribution was wrong: the command
+# finished inside the checker timeout and the pilot's own ledger recorded it as "command
+# exited 0". The cost was `compute_project_fingerprint`, which read every byte of every
+# walked file -- 47.2 GB across 17,692 files, 297.03s, unbounded, on every single Stop.
+#
+# These tests pin the four properties that fix depends on, each written so it would FAIL
+# against the pre-fix implementation.
+
+
+def test_fingerprint_does_not_read_file_contents(tmp_path):
+    """The regression test for the 47 GB read: proves contents are never read, by
+    construction rather than by clock.
+
+    **This test was written twice, and the first version is worth recording.** It
+    asserted the fingerprint completed in under a second against a 64 MiB file, on the
+    reasoning that a content-hashing implementation could not manage that. Checked
+    against a verbatim re-implementation of the pre-fix function, that version passed in
+    0.08s -- sha256 runs at hundreds of MB/s, so the threshold proved nothing and the
+    test was vacuous: green, observing nothing. Replaced with a deterministic property a
+    content-hashing implementation cannot satisfy at any speed -- two files with
+    identical size and identical mtime but different bytes must produce the SAME digest.
+    """
+    import os
+
+    from shipgate.gate.orchestrator import compute_project_fingerprint_detail
+
+    payload_a = tmp_path / "a.py"
+    payload_a.write_bytes(b"AAAA")
+    stat = payload_a.stat()
+    first = compute_project_fingerprint_detail(tmp_path)
+
+    # Same length, different bytes, mtime forced back to exactly what it was.
+    payload_a.write_bytes(b"BBBB")
+    os.utime(payload_a, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    second = compute_project_fingerprint_detail(tmp_path)
+
+    assert first.digest == second.digest, (
+        "digest moved on content alone with size and mtime held fixed -- "
+        "the fingerprint is reading file contents again"
+    )
+    assert first.files_hashed == 1
+    assert first.complete is True
+
+
+def test_fingerprint_excludes_oversize_files_and_counts_them(tmp_path):
+    """The size cap is recorded, not silent. A reader of the `gate_evaluation` event has
+    to be able to tell "nothing was excluded" from "21 artifacts were excluded" --
+    otherwise the digest is 16 opaque characters whose coverage is unknowable."""
+    from shipgate.gate.orchestrator import (
+        _FINGERPRINT_MAX_FILE_BYTES,
+        compute_project_fingerprint_detail,
+    )
+
+    (tmp_path / "src.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "big.bin").write_bytes(b"\xa5" * (_FINGERPRINT_MAX_FILE_BYTES + 1))
+
+    detail = compute_project_fingerprint_detail(tmp_path)
+    assert detail.files_skipped_oversize == 1
+    assert detail.files_hashed == 1
+    assert detail.complete is True
+
+
+def test_fingerprint_is_stable_across_calls_but_moves_when_source_changes(tmp_path):
+    """The property flake detection actually depends on: identical on an unchanged tree,
+    different once real source changes."""
+    import os
+
+    from shipgate.gate.orchestrator import compute_project_fingerprint
+
+    src = tmp_path / "src.py"
+    src.write_text("print('one')\n", encoding="utf-8")
+    first = compute_project_fingerprint(tmp_path)
+    assert first == compute_project_fingerprint(tmp_path), "unchanged tree must be stable"
+
+    # A real edit, with mtime forced to a distinctly later value rather than left to
+    # whatever the clock happened to do. **This test originally just rewrote the file
+    # and asserted the digest moved -- it passed alone and FAILED inside the full suite,
+    # because under load both same-length writes landed in one filesystem timestamp
+    # tick.** That flake was the real defect surfacing (see
+    # `_FINGERPRINT_MTIME_TRUST_WINDOW_NS`); it is now handled by the code under test,
+    # so this test asserts the intended property deterministically instead of racing it.
+    src.write_text("print('two')\n", encoding="utf-8")
+    stat = src.stat()
+    os.utime(src, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+    assert compute_project_fingerprint(tmp_path) != first, "a real source edit must move the digest"
+
+
+
+def test_a_freshly_written_tree_refuses_to_be_compared(tmp_path):
+    """**The invariant the metadata fingerprint would otherwise have broken.** Design
+    decision 4 requires that this signal may under-detect flakiness but may NEVER
+    over-detect it -- mislabelling a genuine regression as 'flaky' would suppress a real
+    red. Two same-length writes inside one timestamp tick produce an identical
+    `(size, mtime)` pair, which would do exactly that. So a tree whose newest file was
+    just touched declines to be comparable at all."""
+    import os
+
+    from shipgate.gate.orchestrator import (
+        _FINGERPRINT_MTIME_TRUST_WINDOW_NS,
+        compute_project_fingerprint_detail,
+    )
+
+    src = tmp_path / "src.py"
+    src.write_text("print('just written')\n", encoding="utf-8")
+
+    fresh = compute_project_fingerprint_detail(tmp_path)
+    assert fresh.complete is True, "the walk itself finished"
+    assert fresh.mtime_settled is False, "a just-written file must not be treated as settled"
+    assert fresh.comparable is False, "an unsettled tree must never be compared"
+
+    # Age the file past the trust window: now the same tree is comparable again.
+    stat = src.stat()
+    os.utime(src, ns=(stat.st_atime_ns, stat.st_mtime_ns - (_FINGERPRINT_MTIME_TRUST_WINDOW_NS + 1_000_000_000)))
+    settled = compute_project_fingerprint_detail(tmp_path)
+    assert settled.mtime_settled is True
+    assert settled.comparable is True
+
+
+def test_fingerprint_ignores_churn_in_oversize_artifacts(tmp_path):
+    """Why the size cap is a correctness fix and not only a speed one. A multi-gigabyte
+    artifact rewritten every session (a DB snapshot, a model checkpoint -- both present in
+    the pilot's tree) would move the digest every attempt, making `fingerprint_unchanged`
+    permanently False so flake detection could never fire at all."""
+    from shipgate.gate.orchestrator import compute_project_fingerprint
+
+    (tmp_path / "src.py").write_text("print('hi')\n", encoding="utf-8")
+    snapshot = tmp_path / "db.snap"
+    snapshot.write_bytes(b"\x00" * (9 * 1024 * 1024))
+    before = compute_project_fingerprint(tmp_path)
+
+    snapshot.write_bytes(b"\x01" * (10 * 1024 * 1024))  # rewritten: new size, new mtime
+    assert compute_project_fingerprint(tmp_path) == before, (
+        "churn in an excluded artifact must not move the digest"
+    )
+
+
+def test_scanned_file_walk_prunes_ignored_directories_without_descending(tmp_path):
+    """The second half of the cost: the old walk descended into `.git`/`.venv`/
+    `node_modules` in full and discarded them afterwards. Asserts both halves -- the
+    files are absent from the result, and an explicitly-listed path under an ignored
+    directory still yields nothing (the pre-fix behaviour this rewrite had to preserve)."""
+    from shipgate.gate.checkers import iter_scanned_files
+
+    (tmp_path / "src.py").write_text("x\n", encoding="utf-8")
+    for ignored in (".git", ".venv", "node_modules"):
+        d = tmp_path / ignored / "deep"
+        d.mkdir(parents=True)
+        (d / "junk.py").write_text("junk\n", encoding="utf-8")
+
+    found = {p.relative_to(tmp_path).as_posix() for p in iter_scanned_files(tmp_path, ["."])}
+    assert found == {"src.py"}, f"ignored directories leaked into the walk: {found}"
+
+    # Explicitly naming a path *inside* an ignored directory still yields nothing.
+    assert list(iter_scanned_files(tmp_path, [".venv/deep"])) == []

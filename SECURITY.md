@@ -210,6 +210,30 @@ evidence note above for its current CI status). This matters for security as muc
 for portability: the core that reads your code and writes your ledger has no dependency
 on, and therefore no attack surface shared with, any specific coding-agent harness.
 
+### Authority invariants
+
+These three lines are the security posture underneath everything above, stated as
+invariants a reviewer can check directly rather than left implicit in the mechanisms
+that already enforce them:
+
+```text
+UNTRUSTED_MODEL_OUTPUT ≠ AUTHORIZATION
+MODEL_REQUEST ≠ CAPABILITY_GRANT
+TOOL_RESULT ≠ POLICY_UPDATE
+```
+
+- **`UNTRUSTED_MODEL_OUTPUT ≠ AUTHORIZATION`** — an agent's self-reported claim of
+  "done" is never trusted; a checker independently decides the verdict against real
+  evidence (`shipgate/gate/checkers.py`).
+- **`MODEL_REQUEST ≠ CAPABILITY_GRANT`** — an agent requesting high-risk work does not
+  grant itself permission; `shipgate declare-task-class` is a self-declaration recorded
+  against the session's blast-radius budget, and the 4th high-risk change in a session
+  is refused without a logged human-typed override reason
+  (`shipgate/gate/blast_radius.py::record_high_risk_change`).
+- **`TOOL_RESULT ≠ POLICY_UPDATE`** — nothing a tool returns can edit `shipfile.yaml`'s
+  policy blocks on ShipGate's behalf; the gate has no code path that writes back to the
+  shipfile from a tool result, ever.
+
 ## Known limitations, stated rather than hidden
 
 - **The gate trusts the shipfile absolutely.** An agent that edits `shipfile.yaml`

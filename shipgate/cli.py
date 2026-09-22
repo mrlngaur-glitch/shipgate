@@ -45,7 +45,7 @@ from shipgate.discipline import (
     run_init,
     utc_now_iso,
 )
-from shipgate.doctor import run_doctor
+from shipgate.doctor import check_hook_wiring, run_doctor
 from shipgate.gate.blast_radius import record_high_risk_change
 from shipgate.ledger.writer import LedgerWriter
 from shipgate.report import (
@@ -237,14 +237,46 @@ def declare_task_class(
 def doctor(
     project_dir: Path = typer.Option(Path("."), "--project-dir"),
 ) -> None:
-    """Checks shipfile.yaml's done_conditions for references to files, scope paths, or
-    grep patterns that no longer resolve to anything real — run at init, weekly, and
-    before evolve. Not part of the gate; this never blocks a Stop.
+    """Two independent checks, both printed, run every time:
 
-    Exit codes: 0 = at least one condition checked, none stale. 1 = stale reference(s)
-    found. 2 = no/invalid shipfile. 3 = nothing checked at all (every done_condition is
-    a type doctor doesn't inspect) — distinct from 0 on purpose; this is never printed
-    as "Clean" (see shipgate.doctor.check.DoctorReport.is_vacuous)."""
+    1. **Shipfile staleness** — done_conditions referencing a file, scope path, or grep
+       pattern that no longer resolves to anything real. Run at init, weekly, and before
+       evolve. Not part of the gate; this never blocks a Stop.
+    2. **Hook wiring** (Session 042, fleet-rollout D-3 defect) — whether
+       `.claude/settings.json`'s configured hook interpreter actually exists and the hook
+       module actually imports under it. Added because `shipgate status`/`report` only
+       read what's already in the ledger and have no way to notice a hook that has gone
+       silently dead (hooks fail open by design) — a project can show `GATE: GREEN` while
+       recording nothing new at all. See `shipgate.doctor.wiring`'s module docstring for
+       the full story and severity rules.
+
+    Exit codes are a strict three-tier priority, decided deliberately (Session 045,
+    pilot-supervisor review) rather than left as an accumulation of ad-hoc
+    per-branch numbers — **always read the printed text for which section(s) actually
+    triggered it, the code alone only tells you the worst tier reached**:
+
+    - **1 — something concrete is broken.** Either a stale shipfile reference or a hook
+      wiring failure (or both). This code intentionally does **not** uniquely identify a
+      wiring failure specifically — it means "go read the two sections above, at least
+      one of them found a real, actionable problem." Always wins over tier 3 below, no
+      matter which vacuity condition is also present (Session 044, a pilot project's own
+      analyst, F-2: every project in this fleet's shipfile is vacuous to doctor by
+      default, so treating vacuity's old code numerically "worse" than a failure meant a
+      real dead hook could never move the exit code at all).
+    - **3 — nothing conclusive was observed, but nothing is confirmed broken either.**
+      Either the shipfile has no done_condition doctor can inspect, or no ShipGate-managed
+      hook entry was found in `.claude/settings.json` at all (i.e. `shipgate init` was
+      never run here) — in either case, `doctor` had nothing real to check on that side.
+      Deliberately never rendered as 0: a project doctor has never actually installed
+      against must never look identical to a project doctor confirmed clean (same
+      vacuous-pass discipline `DoctorReport.is_vacuous` already applied to the shipfile
+      half alone; extended here to the wiring half too).
+    - **0 — genuinely clean.** Both halves were actually checked and found nothing wrong.
+    - **2 — no/invalid shipfile.** Fatal, checked first; wiring is not evaluated at all.
+
+    See `shipgate.doctor.wiring`'s module docstring for the wiring check's own severity
+    rules, and Session 042's original defect report (`shipgate status`/`report` had no
+    way to notice a hook gone silently dead) for why this command's wiring half exists."""
     project_dir = project_dir.resolve()
     try:
         shipfile = load_shipfile(project_dir / "shipfile.yaml")
@@ -255,7 +287,17 @@ def doctor(
         typer.echo(f"shipfile.yaml at {project_dir} is invalid: {exc}", err=True)
         raise typer.Exit(code=2) from None
 
+    # Each half reports its own tier ("broken" / "vacuous" / "clean") independently of
+    # exit-code arithmetic -- the final code is then derived once, below, as a single
+    # explicit priority ladder (broken > vacuous > clean) rather than accumulated via
+    # per-branch max()/override calls. That per-branch-max shape is exactly what produced
+    # the F-2 defect once already (a later, lower-priority branch's max() call silently
+    # lost to an earlier higher-numbered one) -- a single ladder over named tiers, checked
+    # in one place, is not vulnerable to the same class of ordering mistake as the number
+    # of tiers or branches grows.
+    typer.echo("== Shipfile staleness ==")
     report = run_doctor(shipfile, project_dir)
+    shipfile_tier = "clean"
 
     if report.skipped_condition_types:
         typer.echo(
@@ -271,21 +313,53 @@ def doctor(
     # uses the word "clean" — see DoctorReport.is_vacuous's own docstring.
     if report.is_vacuous:
         typer.echo(
-            "\nNothing checked — every done_condition in this shipfile is a type doctor "
+            "Nothing checked — every done_condition in this shipfile is a type doctor "
             "doesn't inspect. This is NOT a clean result: it means doctor had no applicable "
             "condition to examine, not that the shipfile is healthy. Add a file_exists, "
             "forbidden_pattern_absent, or inventory_complete condition for doctor to have "
             "something real to check."
         )
-        raise typer.Exit(code=3)
-
-    if report.stale:
-        typer.echo(f"\n{len(report.stale)} stale reference(s):")
+        shipfile_tier = "vacuous"
+    elif report.stale:
+        typer.echo(f"{len(report.stale)} stale reference(s):")
         for ref in report.stale:
             typer.echo(f"  - [{ref.condition_id}] {ref.condition_type}.{ref.field}={ref.value!r}: {ref.reason}")
-        raise typer.Exit(code=1)
+        shipfile_tier = "broken"
+    else:
+        typer.echo(f"Clean — {len(report.checked_condition_ids)} reference(s) checked, none stale.")
 
-    typer.echo(f"Clean — {len(report.checked_condition_ids)} reference(s) checked, none stale.")
+    typer.echo("\n== Hook wiring ==")
+    wiring = check_hook_wiring(project_dir)
+    wiring_tier = "clean"
+    if wiring.is_vacuous:
+        typer.echo(
+            f"Nothing to check — no ShipGate-managed hook entries found in {wiring.settings_path}. "
+            "This is NOT evidence the install is healthy: it means `shipgate init` has not been "
+            "run here yet (or settings.json belongs to something else entirely)."
+        )
+        wiring_tier = "vacuous"
+    else:
+        failures = [i for i in wiring.issues if i.severity == "fail"]
+        warnings = [i for i in wiring.issues if i.severity == "warn"]
+        if failures:
+            typer.echo(f"{len(failures)} FAILURE(S) — these hooks are not actually recording anything:")
+            for issue in failures:
+                typer.echo(f"  - [{issue.event}] {issue.reason}")
+            wiring_tier = "broken"
+        if warnings:
+            typer.echo(f"{len(warnings)} warning(s):")
+            for issue in warnings:
+                typer.echo(f"  - [{issue.event}] {issue.reason}")
+        if not failures and not warnings:
+            typer.echo(
+                f"OK — {len(wiring.hooks_found)} hook event(s) configured "
+                f"({', '.join(wiring.hooks_found)}), interpreter resolves, hook module imports."
+            )
+
+    if "broken" in (shipfile_tier, wiring_tier):
+        raise typer.Exit(code=1)
+    if "vacuous" in (shipfile_tier, wiring_tier):
+        raise typer.Exit(code=3)
 
 
 @app.command()

@@ -2,11 +2,13 @@
 
 **The independent completion gate for AI coding agents — the agent doesn't get to grade its own homework.**
 
+*Models propose completion; ShipGate checks the evidence before the commit is allowed.*
+
 AI coding agents constantly fall into a classic trap: declaring victory the moment code is written to disk, regardless of whether declared done-conditions actually ran or produced evidence. I built ShipGate to close that loop by establishing an independent validation layer—because an AI should never grade its own homework.
 
 > **Status: pre-launch, Phase 3 substantially built.** The gate, the append-only ledger, the
 > hooks that write to it, and the CLI below (`init` / `status` / `report` / `doctor` /
-> `declare-task-class` / `analyze`) are real, tested (468 tests, Windows, local, this commit,
+> `declare-task-class` / `analyze`) are real, tested (495 tests, Windows, local, this commit,
 > shown running below; CI's own most recently recorded run — Linux, [run
 > 34025172117](https://github.com/mrlngaur-glitch/shipgate/actions/runs/34025172117) —
 > collected 466, 465 passed and 1 skipped, see the table below for exactly what that run
@@ -42,6 +44,16 @@ AI coding agents constantly fall into a classic trap: declaring victory the mome
 ShipGate converts rough plain-English requests into machine-checkable contracts, and refuses to
 accept an agent's work until its claims are verified against recorded evidence **by a party that
 is not the agent**.
+
+**Which model is ShipGate gating?** Whichever one you point Claude Code at — ShipGate is
+model-agnostic today. The hook payload it reads carries no `model` field at all
+(`shipgate/hooks/_common.py`), so the gate's decisions never depend on which backend answered;
+it gates behavior (files touched, tests run, evidence recorded), not model identity. That means
+it already works underneath any backend Claude Code is pointed at via existing third-party tools
+such as [claude-code-router](https://github.com/musistudio/claude-code-router) or
+[LiteLLM](https://github.com/BerriAI/litellm) — including free or local models — with zero
+ShipGate changes required. ShipGate's own router (quota-aware, cross-model fallback) is planned
+fast-follow work (F4), not yet built.
 
 ## Quickstart
 
@@ -95,39 +107,50 @@ lint-imports        # core purity: no harness-specific imports in the gate/ledge
 ruff check .
 ```
 
-**Real output, this session, fresh venv, a clean `git clone` of this repository's own
-committed source (not the working tree) into a new temp directory — re-run, not hand-edited,
-when the suite grew since the last paste (Windows; command as shown above). A `git clone` here,
-not a `git archive` extraction: `test_archive_boundary.py` invokes `git` itself to inspect this
-repository, and a bare `git archive` extraction has no `.git` directory for it to find — found
-live, this session, by running exactly this reproduction against an archive extraction first
-and watching that file fail (2 failed, 2 errored — "not a git repository", exit 128, not a real
-result about anything this README claims; `test_docs_reality.py`'s own 5 tests do not touch
-`git` and passed against the archive extraction unaffected), then switching to a clone, which
-carries real history and passes clean:**
+**Real output, this session (Session 049), against a fresh `git clone` of this repository's own
+committed source (commit `c78b6f0`, not the working tree) into a new temp directory, fresh venv,
+run natively from PowerShell — not the Bash tool, because Session 048 showed the Bash tool's own
+shell can hide a real PATH/shell defect (Windows; commands as shown above).**
+
+**The clone-based re-verification owed since Session 048 paid for itself immediately: the first
+run, against Session 048's own commit (`19d3db3`), FAILED.** A regression test asserted
+`" " in sys.executable`, true only by the accident of `shipgate_private`'s own path containing a
+space — and false the moment the identical test ran against this clone's own space-free temp
+path, exactly the scenario this verification step exists to force. Reproduced directly rather
+than patched over: bash's unquoted-word handling doesn't only word-split on spaces, it also
+strips bare backslashes as escape characters, so an unquoted Windows interpreter path fails via
+bash regardless of whether it contains a space — a more general mechanism than the original
+diagnosis (Session 048, pilot project) named, though the shipped fix (quoting) already covered it
+either way; nothing in the production code changed. Fixed in `c78b6f0`. This paste is the clean
+re-run against that commit:
 
 ```
 $ .venv\Scripts\python.exe -m pytest -q
-........................................................................ [ 15%]
-........................................................................ [ 30%]
-........................................................................ [ 46%]
-........................................................................ [ 61%]
-........................................................................ [ 76%]
-........................................................................ [ 92%]
-....................................                                     [100%]
-468 passed in 127.43s (0:02:07)
+........................................................................ [ 14%]
+........................................................................ [ 29%]
+........................................................................ [ 43%]
+........................................................................ [ 58%]
+........................................................................ [ 72%]
+........................................................................ [ 87%]
+...............................................................          [100%]
+495 passed in 64.61s (0:01:04)
 
 $ .venv\Scripts\lint-imports.exe
-=============
-Import Linter
-=============
+╔══╗─────────▶╔╗ ╔╗      ╔╗◀───┐
+╚╣╠╝◀─────┐  ╔╝╚╗║║────▶╔╝╚╗   │
+ ║║   ╔══╦══╦╩╗╔╝║║  ╔╦═╩╗╔╝╔═╦══╗
+ ║║╔══╣╔╗║╔╗║╔╣║ ║║ ╔╬╣╔╗║║ ║│║╔═╝
+╔╣╠╣║║║╚╝║╚╝║║║╚╗║╚═╝║║║║║╚╗║═╣║
+╚══╩╩╩╣╔═╩══╩╝╚═╝╚═══╩╩╝╚╩═╩╩═╩╝
+  └──▶║║                    ▲
+      ╚╝────────────────────┘
 
 
 ---------
 Contracts
 ---------
 
-Analyzed 43 files, 65 dependencies.
+Analyzed 44 files, 66 dependencies.
 -----------------------------------
 
 Core is harness-agnostic (no Claude Code imports in
@@ -137,8 +160,9 @@ Contracts: 1 kept, 0 broken.
 ```
 
 (`lint-imports` prints an ASCII-art banner some runs and not others — the same pinned 2.13
-build, observed both ways across sessions; this paste shows the plain banner-less form this
-run actually produced, not trimmed for aesthetics either way.)
+build, observed both ways across sessions; this paste shows the banner form this run actually
+produced, not trimmed for aesthetics either way. The file/dependency count rose from 43/65 to
+44/66 since the last paste, tracking `shipgate/doctor/wiring.py`'s Session 048 growth.)
 
 ## See it work
 
@@ -260,7 +284,7 @@ each command by hand and see what it does.
 |---|---|---|---|
 | 1 | The Windows install (three `pip` commands above) works end-to-end | `runtime-verified` | Run in a genuinely fresh venv this session; `pytest`/`lint-imports` output pasted above, unedited |
 | 2 | The macOS/Linux install works the same way — narrowly true for the three `pip` lines only, not for `git clone` / `python3.12 -m venv .venv` / `source .venv/bin/activate` | `runtime-verified` (Linux, the three `pip` lines) / not run anywhere (Linux, the other two lines) / `disk-verified` (macOS, the whole block) | CI's first real run ([run 32182623079](https://github.com/mrlngaur-glitch/shipgate/actions/runs/32182623079)) runs `actions/checkout` (not `git clone`) and `actions/setup-python` (not `python3.12 -m venv .venv`, and no `source activate`), then this block's three `pip` commands — so only those three are CI-verified on Linux. Fair to this project's own other work: `ci.yml:158`'s audit step does run `python -m venv "$RUNNER_TEMP/auditenv"` on this same Ubuntu runner, so the `venv` *module* is demonstrably not broken on CI's Python; what's untested is the `python3.12` binary name on a stock Ubuntu (`ensurepip` ships separately as the `python3.12-venv` package there — a real, plausible failure, not a pedantic one) and the activation line. macOS: nothing in this block has run anywhere |
-| 3 | Tests pass — **468, Windows, local, this commit**, and separately, **465 passed / 1 skipped of 466 collected, Linux, CI, [run 34025172117](https://github.com/mrlngaur-glitch/shipgate/actions/runs/34025172117) — not this commit**, since a push hasn't happened since this commit was made and CI only runs on push; the gap is this commit's own 39 tests added since that run (37 already counted the last time this row was updated — see git history for that breakdown — plus 2 new this round: `tests/unit/test_report.py` and `tests/unit/test_cli_report.py` — Finding 8's systematic integrity pass: every rendered Ship Report input enumerated with its source and whether `--verify`'s hash-chain re-derivation covers it; one data-layer test, one CLI-output wording test), not a platform difference | `runtime-verified` (both, against their own stated scope) | Windows: pasted above, this session, this commit. Linux/CI: run 34025172117 — 466 collected (minimum 466 at that commit), 465 passed, 1 skipped; the skip is `tests/integration/test_hooks_e2e.py`'s Windows-only `icacls` ACL test (`skipif(os.name != "nt")`) — the same honest platform skip CI has always shown, not a vacuous pass |
+| 3 | Tests pass — **495, Windows, local, this commit**, and separately, **465 passed / 1 skipped of 466 collected, Linux, CI, [run 34025172117](https://github.com/mrlngaur-glitch/shipgate/actions/runs/34025172117) — not this commit**, since a push hasn't happened since this commit was made and CI only runs on push; the gap is this commit's own 55 tests added since that run (39 already counted the last time this row was updated — see git history for that breakdown — plus 8 in Session 043: `tests/unit/test_hook_wiring.py` — fleet-rollout D-3 defect: `shipgate doctor` now also verifies hook wiring, not just shipfile staleness, after `shipgate status` was found reporting `GATE: GREEN` on a project whose hooks were all silently dead — plus 2 in Session 044: an end-to-end regression proving a wiring failure now forces exit code 1 even when the shipfile is vacuous, D-3's own follow-up F-2 — plus 1 in Session 045: a project with a clean shipfile but no ShipGate hooks installed at all now renders exit 3, not a silent 0 — plus 1 in Session 046: the hook-wiring freshness signal now comes from the ledger's own hook-sourced rows, not the ledger file's mtime, after a CLI-only write was found making a fully-dead-hooks project look freshly active — plus 4 in Session 048: the hook-command interpreter path was never quoted, so every hook in the fleet has been failing silently at the Git Bash shell layer since install; `doctor` gained a real shell-execution check that runs the exact configured command through the actual resolved Git Bash, not a bare `bash` off PATH, which was itself proven live to resolve to Windows' WSL launcher on this machine's real PATH), not a platform difference | `runtime-verified` (both, against their own stated scope) | Windows: pasted above, this session, this commit. Linux/CI: run 34025172117 — 466 collected (minimum 466 at that commit), 465 passed, 1 skipped; the skip is `tests/integration/test_hooks_e2e.py`'s Windows-only `icacls` ACL test (`skipif(os.name != "nt")`) — the same honest platform skip CI has always shown, not a vacuous pass |
 | 4 | `shipgate init` writes `shipfile.yaml` / `CLAUDE.md` / `.claude/settings.json`, never overwrites | `runtime-verified` | Real run, this session, pasted above; the never-overwrite behavior is separately tested (`tests/`) |
 | 5 | The hooks write real ledger rows via the same entrypoints Claude Code invokes | `runtime-verified` | Real subprocess run of all three hook modules this session, JSON on stdin, feeding the `status`/`report` output above |
 | 6 | `shipgate report` renders a verdict per claim, a blast-radius line, a token line, and a self-verifying ledger receipt | `runtime-verified` | Pasted above, unedited, this session |
@@ -288,7 +312,7 @@ Without an independent gate recording hash-chained proof, these failures drift i
 | Path | What it is |
 |---|---|
 | `shipgate/` | The core package — ledger, gate, verdict taxonomy, checkers, hooks, CLI |
-| `tests/` | 468 tests (unit + integration) — the real evidence behind every `runtime-verified` row above. 468 pass / 0 skipped locally on Windows, this commit; CI's own most recently recorded run (run 34025172117, not this commit — see the evidence table above) saw 465 pass / 1 skipped of 466 collected on Linux (the Windows-only `icacls` test) |
+| `tests/` | 495 tests (unit + integration) — the real evidence behind every `runtime-verified` row above. 495 pass / 0 skipped locally on Windows, this commit; CI's own most recently recorded run (run 34025172117, not this commit — see the evidence table above) saw 465 pass / 1 skipped of 466 collected on Linux (the Windows-only `icacls` test) |
 | `reporters/` | Per-test-runner reporters (`pytest` today; the vacuous-pass detection `tests_pass` relies on) |
 | `docs/verdicts_explainer.md` | The 7-class verdict taxonomy, plain-language, frozen since Gate A |
 | `docs/shipfile_worked_example.yaml` (+ `.md`) | A fuller worked `shipfile.yaml` than `shipgate init` generates |
